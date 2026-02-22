@@ -18,6 +18,9 @@ from datetime import datetime, timedelta
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+import os
+# İşletim sistemine sahte bir terminal veriyoruz
+os.environ["TERM"] = "xterm-256color"
 
 warnings.filterwarnings('ignore')
 console = Console(width=160, record=True, color_system="truecolor", force_terminal=True)
