@@ -1027,8 +1027,6 @@ def run_bot_cycle():
 
                 if power_score < CONFIG["MIN_POWER_SCORE"]:
                     reason = f"LOW_POWER_{power_score:.0f}"
-                elif state.is_chop_market:
-                    reason = "CHOP_MARKET"
                 elif signal == "LONG" and btc_ctx["trend"] != 1:
                     reason = "BTC_TREND_KOTU"
                 elif signal == "SHORT" and btc_ctx["trend"] != -1:
