@@ -111,7 +111,6 @@ class HunterState:
         self.ranking_data = {}
         self.cooldowns = {}
         self.market_direction_text = "Hesaplaniyor..."
-        self.market_direction_text = "Hesaplanıyor..."
         self.missed_this_scan = 0
         self.hourly_missed_signals = 0
         self.balance = CONFIG["STARTING_BALANCE"]
@@ -137,7 +136,22 @@ class HunterState:
     def load_state(self):
         try:
             with open(FILES["ACTIVE"], 'r') as f:
-                self.active_positions = json.load(f)
+                raw = json.load(f)
+            # Restart sonrası pozisyon kurtarma:
+            # full_time'ı şimdiki zamana sıfırla ki timeout anında tetiklenmesin.
+            # Gerçek giriş fiyatı, SL, TP korunuyor — sadece süre sayacı resetleniyor.
+            now_str = (datetime.utcnow() + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S')
+            recovered = 0
+            for sym, pos in raw.items():
+                if 'entry_p' in pos and 'sl' in pos and 'tp' in pos:
+                    pos['full_time']      = now_str   # süre sayacını resetle
+                    pos['restarted']      = True       # log için işaretle
+                    pos.setdefault('curr_pnl', 0.0)
+                    pos.setdefault('curr_p', pos['entry_p'])
+                    recovered += 1
+            self.active_positions = raw
+            if recovered > 0:
+                print(f"[RESTART] {recovered} acik pozisyon kurtarildi: {list(raw.keys())}", flush=True)
         except Exception:
             self.active_positions = {}
 
@@ -147,6 +161,7 @@ class HunterState:
                 self.balance      = saved.get("balance", CONFIG["STARTING_BALANCE"])
                 self.peak_balance = saved.get("peak_balance", CONFIG["STARTING_BALANCE"])
                 self.scan_id      = saved.get("scan_id", 0)
+            print(f"[RESTART] State yuklendi — Kasa: ${self.balance:.2f} | Scan ID: {self.scan_id}", flush=True)
         except Exception:
             pass
 
@@ -422,13 +437,13 @@ def hesapla_power_score(row) -> float:
     score += atr_component
 
     # MACD histogram yönü (0-10)
-    if bool(row['FLIP_LONG']) and float(row.get('MACD_HIST', 0)) > 0:
+    if bool(row['FLIP_LONG']) and float(row['MACD_HIST']) > 0:
         score += 10
-    elif bool(row['FLIP_SHORT']) and float(row.get('MACD_HIST', 0)) < 0:
+    elif bool(row['FLIP_SHORT']) and float(row['MACD_HIST']) < 0:
         score += 10
 
     # BB genişliği (0-5) — sıkışık piyasayı cezalandır
-    bb_width = (row.get('BBANDS_UP', 0) - row.get('BBANDS_LOW', 0)) / row.get('BBANDS_MID', 1) * 100
+    bb_width = (float(row['BBANDS_UP']) - float(row['BBANDS_LOW'])) / max(float(row['BBANDS_MID']), 1e-10) * 100
     bb_component = max(0, min(5, bb_width * 0.5))
     score += bb_component
 
@@ -530,7 +545,7 @@ def log_potential_signal(sym: str, signal_type: str, row, score: int,
         btc_ctx = {}
 
     try:
-        bb_width = (row.get('BBANDS_UP', 0) - row.get('BBANDS_LOW', 0)) / row.get('BBANDS_MID', 1) * 100
+        bb_width = (float(row['BBANDS_UP']) - float(row['BBANDS_LOW'])) / max(float(row['BBANDS_MID']), 1e-10) * 100
         log_row = {
             # Zaman / kimlik
             'timestamp':        get_tr_time().isoformat(),
@@ -549,25 +564,25 @@ def log_potential_signal(sym: str, signal_type: str, row, score: int,
             # İndikatörler
             'rsi':              round(float(row['RSI']), 2),
             'adx':              round(float(row['ADX']), 2),
-            'plus_di':          round(float(row.get('PLUS_DI', 0)), 2),
-            'minus_di':         round(float(row.get('MINUS_DI', 0)), 2),
+            'plus_di':          round(float(row['PLUS_DI']), 2),
+            'minus_di':         round(float(row['MINUS_DI']), 2),
             'atr_14':           round(float(row['ATR_14']), 6),
             'atr_pct':          round(float(row['ATR_PCT']), 4),
             'vol_ratio':        round(float(row['VOL_RATIO']), 3),
             'ema20':            round(float(row['EMA20']), 6),
-            'ema50':            round(float(row.get('EMA50', 0)), 6),
+            'ema50':            round(float(row['EMA50']), 6),
             'st_line':          round(float(row['ST_LINE']), 6),
-            'st_dist_pct':      round(float(row.get('ST_DIST_PCT', 0)), 4),
-            'macd':             round(float(row.get('MACD', 0)), 6),
-            'macd_signal':      round(float(row.get('MACD_SIGNAL', 0)), 6),
-            'macd_hist':        round(float(row.get('MACD_HIST', 0)), 6),
-            'bb_upper':         round(float(row.get('BBANDS_UP', 0)), 6),
-            'bb_lower':         round(float(row.get('BBANDS_LOW', 0)), 6),
+            'st_dist_pct':      round(float(row['ST_DIST_PCT']), 4),
+            'macd':             round(float(row['MACD']), 6),
+            'macd_signal':      round(float(row['MACD_SIGNAL']), 6),
+            'macd_hist':        round(float(row['MACD_HIST']), 6),
+            'bb_upper':         round(float(row['BBANDS_UP']), 6),
+            'bb_lower':         round(float(row['BBANDS_LOW']), 6),
             'bb_width_pct':     round(float(bb_width), 3),
             # Price action
-            'body_pct':         round(float(row.get('BODY_PCT', 0)), 4),
-            'upper_wick_pct':   round(float(row.get('UPPER_WICK', 0)), 4),
-            'lower_wick_pct':   round(float(row.get('LOWER_WICK', 0)), 4),
+            'body_pct':         round(float(row['BODY_PCT']), 4),
+            'upper_wick_pct':   round(float(row['UPPER_WICK']), 4),
+            'lower_wick_pct':   round(float(row['LOWER_WICK']), 4),
             # BTC context
             'btc_trend':        btc_ctx.get('trend', 0),
             'btc_atr_pct':      btc_ctx.get('atr_pct', 0.0),
@@ -667,8 +682,10 @@ def create_trade_chart(df, sym, pos, is_entry=False, curr_c=None, pnl=0.0, close
 
         ax.vlines(up.index,   up.low,   up.high,   color='#2ecc71', linewidth=1.5, alpha=0.8)
         ax.vlines(down.index, down.low, down.high, color='#e74c3c', linewidth=1.5, alpha=0.8)
-        ax.bar(up.index,   up.close   - up.open,   0.008, bottom=up.open,     color='#2ecc71', alpha=0.9)
-        ax.bar(down.index, down.open  - down.close, 0.008, bottom=down.close, color='#e74c3c', alpha=0.9)
+        # Bar genişliğini fiyat aralığına göre dinamik ayarla
+        bar_w = (plot_df.index[-1] - plot_df.index[0]).total_seconds() / len(plot_df) * 0.6 / 86400
+        ax.bar(up.index,   up.close   - up.open,   bar_w, bottom=up.open,     color='#2ecc71', alpha=0.9)
+        ax.bar(down.index, down.open  - down.close, bar_w, bottom=down.close, color='#e74c3c', alpha=0.9)
 
         ax.axhline(pos['entry_p'], color='#3498db', linestyle='--', alpha=0.8, label='Giriş')
         ax.axhline(pos['tp'],      color='#2ecc71', linestyle=':',  linewidth=2, label='TP')
@@ -762,7 +779,6 @@ def ntfy_komut_dinle():
       status — durum ile aynı (alias)
     """
     url = f"https://ntfy.sh/{CONFIG['NTFY_TOPIC']}/sse"
-    pass  # NTFY Komut Dinleyici başlatıldı
 
     while True:
         try:
@@ -945,6 +961,7 @@ def run_bot_cycle():
                     trade_log = {
                         # Kimlik
                         'Scan_ID':           state.scan_id,
+                        'Restarted':         pos.get('restarted', False),
                         'Tarih':             get_tr_time().strftime('%Y-%m-%d'),
                         'Giris_Saati':       pos['full_time'].split(' ')[1],
                         'Cikis_Saati':       get_tr_time().strftime('%H:%M:%S'),
@@ -1012,11 +1029,6 @@ def run_bot_cycle():
 
             # ── B. YENİ SİNYAL ────────────────────────────────────────
             row_closed = df.iloc[-2]
-
-            # ATR_PCT kolonunu row'a ekle (sinyal_kontrol kullanıyor)
-            if 'ATR_PCT' not in row_closed.index:
-                row_closed = row_closed.copy()
-                row_closed['ATR_PCT'] = (row_closed['ATR_14'] / row_closed['close']) * 100
 
             signal = sinyal_kontrol(row_closed)
             entered, reason = False, ""
@@ -1181,6 +1193,18 @@ if __name__ == "__main__":
     # NTFY komut dinleyiciyi ayrı thread'de başlat
     komut_thread = threading.Thread(target=ntfy_komut_dinle, daemon=True)
     komut_thread.start()
+
+    # Restart sonrası açık pozisyonları bildir
+    if state.active_positions:
+        pozlar = ", ".join(
+            f"{sym} {pos['dir']} @ {pos['entry_p']:.5f}"
+            for sym, pos in state.active_positions.items()
+        )
+        send_ntfy_notification(
+            "🔄 RESTART — Pozisyonlar Kurtarıldı",
+            f"{len(state.active_positions)} açık pozisyon devam ediyor:\n{pozlar}\nSüre sayacı resetlendi.",
+            tags="arrows_counterclockwise,white_check_mark", priority="4"
+        )
 
     while True:
         try:
