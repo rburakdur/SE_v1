@@ -47,7 +47,7 @@ CONFIG = {
     "RISK_PERCENT_PER_TRADE": 25.0,
     "MIN_TRADE_SIZE": 10.0,
     "MAX_TRADE_SIZE": 200.0,
-    "TOP_COINS_LIMIT": 40,
+    "TOP_COINS_LIMIT": 50,
     "ST_M": 2.8,
     "RSI_PERIOD": 9,
     "RSI_LONG": 62,
@@ -401,7 +401,7 @@ def hesapla_power_score(row) -> float:
     score = 0.0
 
     # RSI bileşeni (0-25)
-    if row['FLIP_LONG']:
+    if bool(row['FLIP_LONG']):
         rsi_component = max(0, min(25, (row['RSI'] - CONFIG["RSI_LONG"]) * 2.5))
     else:
         rsi_component = max(0, min(25, (CONFIG["RSI_SHORT"] - row['RSI']) * 2.5))
@@ -420,9 +420,9 @@ def hesapla_power_score(row) -> float:
     score += atr_component
 
     # MACD histogram yönü (0-10)
-    if row['FLIP_LONG'] and row.get('MACD_HIST', 0) > 0:
+    if bool(row['FLIP_LONG']) and float(row.get('MACD_HIST', 0)) > 0:
         score += 10
-    elif row['FLIP_SHORT'] and row.get('MACD_HIST', 0) < 0:
+    elif bool(row['FLIP_SHORT']) and float(row.get('MACD_HIST', 0)) < 0:
         score += 10
 
     # BB genişliği (0-5) — sıkışık piyasayı cezalandır
@@ -436,24 +436,29 @@ def hesapla_signal_score(row) -> int:
     """
     Kaç koşul sağlandı (0-6). Basit sayım, gücü değil adeti verir.
     """
+    flip_long  = bool(row['FLIP_LONG'])
+    flip_short = bool(row['FLIP_SHORT'])
     checks = [
-        row.get('FLIP_LONG', False) or row.get('FLIP_SHORT', False),
-        row['RSI'] > CONFIG["RSI_LONG"] if row.get('FLIP_LONG') else row['RSI'] < CONFIG["RSI_SHORT"],
+        flip_long or flip_short,
+        row['RSI'] > CONFIG["RSI_LONG"] if flip_long else row['RSI'] < CONFIG["RSI_SHORT"],
         row['VOL_RATIO'] > CONFIG["VOL_FILTER"],
         row['ADX'] > CONFIG["ADX_THRESHOLD"],
         row['ATR_PCT'] > CONFIG["MIN_ATR_PERCENT"],
-        (row['close'] > row['EMA20']) if row.get('FLIP_LONG') else (row['close'] < row['EMA20'])
+        (row['close'] > row['EMA20']) if flip_long else (row['close'] < row['EMA20'])
     ]
     return sum(checks)
 
 def sinyal_kontrol(row):
-    atr_ok = (row['ATR_14'] / row['close'] * 100) >= CONFIG["MIN_ATR_PERCENT"]  # Artık aktif!
-    is_long  = (row['FLIP_LONG']  and row['RSI'] > CONFIG["RSI_LONG"]
+    # pandas Series'te bool değerleri .get() değil bool() ile alınmalı
+    flip_long  = bool(row['FLIP_LONG'])
+    flip_short = bool(row['FLIP_SHORT'])
+    atr_ok     = bool((row['ATR_14'] / row['close'] * 100) >= CONFIG["MIN_ATR_PERCENT"])
+    is_long  = (flip_long  and row['RSI'] > CONFIG["RSI_LONG"]
                 and row['VOL_RATIO'] > CONFIG["VOL_FILTER"]
                 and row['close'] > row['EMA20']
                 and row['ADX']   > CONFIG["ADX_THRESHOLD"]
                 and atr_ok)
-    is_short = (row['FLIP_SHORT'] and row['RSI'] < CONFIG["RSI_SHORT"]
+    is_short = (flip_short and row['RSI'] < CONFIG["RSI_SHORT"]
                 and row['VOL_RATIO'] > CONFIG["VOL_FILTER"]
                 and row['close'] < row['EMA20']
                 and row['ADX']   > CONFIG["ADX_THRESHOLD"]
@@ -760,10 +765,17 @@ def draw_fund_dashboard():
         console.print(Panel("[dim]Henüz sinyal tespit edilmedi...[/]", title="[bold white]📋 SON SİNYALLER[/]", border_style="dim white"))
 
     if state.is_scanning:
+        # Progress bar
+        total    = state.total_count if state.total_count > 0 else 1
+        done     = state.processed_count
+        pct      = int((done / total) * 100)
+        bar_len  = 40
+        filled   = int(bar_len * done / total)
+        bar      = "█" * filled + "░" * (bar_len - filled)
         console.print(
-            f"\n📡 [bold yellow]{state.status}[/] | "
-            f"İlerleme: [bold bright_green]{state.processed_count}/{state.total_count}[/] | "
-            f"Coin: {state.current_coin}"
+            f"\n📡 [bold yellow]{state.status}[/]\n"
+            f"   [bold bright_green]{bar}[/] [bold white]{pct}%[/] "
+            f"([bold bright_green]{done}/{total}[/]) | Coin: [bold cyan]{state.current_coin}[/]"
         )
     else:
         console.print(f"\n📡 [bold bright_green]{state.status}[/]")
