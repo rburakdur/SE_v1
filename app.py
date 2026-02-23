@@ -47,7 +47,7 @@ CONFIG = {
     "RISK_PERCENT_PER_TRADE": 25.0,
     "MIN_TRADE_SIZE": 10.0,
     "MAX_TRADE_SIZE": 200.0,
-    "TOP_COINS_LIMIT": 50,
+    "TOP_COINS_LIMIT": 40,
     "ST_M": 2.8,
     "RSI_PERIOD": 9,
     "RSI_LONG": 62,
@@ -130,6 +130,7 @@ class HunterState:
         self.btc_vol_ratio = 0.0
         self.is_chop_market = False
         self.scan_id = 0  # Her scan'e benzersiz ID, logları birbirine bağlar
+        self.son_sinyaller = []   # Son 8 sinyal — dashboard'da gösterilir
         self.load_state()
 
     @property
@@ -734,6 +735,30 @@ def draw_fund_dashboard():
     else:
         console.print(Panel("[dim]Şu an açık pozisyon bulunmuyor...[/]", title="[bold white]⚪ AKTİF İŞLEM YOK[/]", border_style="dim white"))
 
+    # ── Son Sinyaller Tablosu ─────────────────────────────────
+    if state.son_sinyaller:
+        sig_table = Table(expand=True, header_style="bold magenta", show_lines=True)
+        for col in ["Zaman", "Coin", "Sinyal", "Durum", "Neden", "Power", "RSI", "ADX", "VOL"]:
+            sig_table.add_column(col)
+        for s in state.son_sinyaller[-8:]:
+            durum_renk = "bold bright_green" if s["entered"] else "bold bright_red"
+            durum_txt  = "✅ GİRİLDİ" if s["entered"] else "⛔ REDDEDİLDİ"
+            sig_renk   = "bright_green" if s["signal"] == "LONG" else "bright_red"
+            sig_table.add_row(
+                f"[dim]{s['zaman']}[/]",
+                f"[bold white]{s['coin']}[/]",
+                f"[bold {sig_renk}]{s['signal']}[/]",
+                f"[{durum_renk}]{durum_txt}[/]",
+                f"[dim yellow]{s['reason']}[/]",
+                f"[cyan]{s['power']}[/]",
+                f"[white]{s['rsi']}[/]",
+                f"[white]{s['adx']}[/]",
+                f"[white]{s['vol']}[/]",
+            )
+        console.print(Panel(sig_table, title=f"[bold magenta]📋 SON SİNYALLER (Son {len(state.son_sinyaller[-8:])})[/]", border_style="magenta"))
+    else:
+        console.print(Panel("[dim]Henüz sinyal tespit edilmedi...[/]", title="[bold white]📋 SON SİNYALLER[/]", border_style="dim white"))
+
     if state.is_scanning:
         console.print(
             f"\n📡 [bold yellow]{state.status}[/] | "
@@ -1011,8 +1036,23 @@ def run_bot_cycle():
                         log_error("entry_notification", e, sym)
 
                 if not entered:
-                    state.missed_this_scan   += 1
+                    state.missed_this_scan      += 1
                     state.hourly_missed_signals += 1
+
+                # Dashboard için son sinyalleri tut (max 50)
+                state.son_sinyaller.append({
+                    'zaman':   get_tr_time().strftime('%H:%M:%S'),
+                    'coin':    sym,
+                    'signal':  signal,
+                    'entered': entered,
+                    'reason':  reason if not entered else '-',
+                    'power':   power_score,
+                    'rsi':     round(float(row_closed['RSI']), 1),
+                    'adx':     round(float(row_closed['ADX']), 1),
+                    'vol':     round(float(row_closed['VOL_RATIO']), 2),
+                })
+                if len(state.son_sinyaller) > 50:
+                    state.son_sinyaller = state.son_sinyaller[-50:]
 
                 log_potential_signal(sym, signal, row_closed,
                                      signal_score, power_score,
