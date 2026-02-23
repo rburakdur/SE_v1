@@ -23,6 +23,7 @@ import io
 import gc
 import traceback
 import concurrent.futures
+import threading
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -781,6 +782,70 @@ def draw_fund_dashboard():
         console.print(f"\n📡 [bold bright_green]{state.status}[/]")
 
 # ==============================================================
+# NTFY KOMUT DİNLEYİCİSİ
+# ==============================================================
+def ntfy_komut_dinle():
+    """
+    Ayrı thread'de çalışır. ntfy subscribe endpoint'ini dinler.
+    Desteklenen komutlar (ntfy'den mesaj olarak gönder):
+      logs   — tüm log dosyalarını hemen gönderir
+      durum  — anlık kasa/pozisyon özeti
+      status — durum ile aynı (alias)
+    """
+    url = f"https://ntfy.sh/{CONFIG['NTFY_TOPIC']}/sse"
+    console.print("[dim cyan]📻 NTFY Komut Dinleyici başlatıldı...[/]")
+
+    while True:
+        try:
+            with requests.get(url, stream=True, timeout=None) as resp:
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    line = line.decode('utf-8', errors='ignore')
+                    if not line.startswith('data:'):
+                        continue
+                    try:
+                        payload = json.loads(line[5:].strip())
+                        mesaj   = payload.get('message', '').strip().lower()
+                        console.print(f"[dim cyan]📻 NTFY Komut:[/] {mesaj}")
+
+                        if mesaj == 'logs':
+                            send_ntfy_notification(
+                                "📦 Manuel Log Talebi Alındı",
+                                "Dosyalar hazırlanıyor, birazdan gelecek...",
+                                tags="package", priority="3"
+                            )
+                            threading.Thread(target=gunluk_dump_gonder, daemon=True).start()
+
+                        elif mesaj in ('durum', 'status'):
+                            tot_trd, wins, b_wr, pf, max_dd = get_advanced_metrics()
+                            acik = len(state.active_positions)
+                            pozlar = ""
+                            for sym, pos in state.active_positions.items():
+                                pozlar += f"  • {sym} {pos['dir']} | PnL: %{pos.get('curr_pnl',0):.2f}\n"
+                            durum_msg = (
+                                f"💵 Kasa: ${state.balance:.2f} (Tepe: ${state.peak_balance:.2f})\n"
+                                f"📈 Açık İşlem: {acik}/{CONFIG['MAX_POSITIONS']}\n"
+                                f"{pozlar}"
+                                f"🏆 Başarı: {wins}/{tot_trd} (%{b_wr}) | PF: {pf}\n"
+                                f"🌍 Piyasa: {state.market_direction_text}\n"
+                                f"🔢 Scan ID: {state.scan_id}"
+                            )
+                            send_ntfy_notification(
+                                f"📊 Anlık Durum ({get_tr_time().strftime('%H:%M')})",
+                                durum_msg, tags="bar_chart", priority="3"
+                            )
+
+                    except (json.JSONDecodeError, Exception) as e:
+                        log_error("ntfy_komut_parse", e, line[:100])
+
+        except Exception as e:
+            log_error("ntfy_komut_dinle", e)
+            time.sleep(15)   # bağlantı koparsa 15sn bekle yeniden bağlan
+
+
+
+# ==============================================================
 # 13. ANA KONTROL DÖNGÜSÜ
 # ==============================================================
 def run_bot_cycle():
@@ -1143,6 +1208,10 @@ if __name__ == "__main__":
         "🚀 v85.0 BAŞLATILDI",
         start_msg, tags="rocket,shield", priority="4"
     )
+
+    # NTFY komut dinleyiciyi ayrı thread'de başlat
+    komut_thread = threading.Thread(target=ntfy_komut_dinle, daemon=True)
+    komut_thread.start()
 
     while True:
         try:
