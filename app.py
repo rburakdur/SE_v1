@@ -29,13 +29,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime, timedelta
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-
 warnings.filterwarnings('ignore')
-console = Console(width=160, record=True, color_system="truecolor", force_terminal=True)
-os.environ["TERM"] = "xterm-256color"
 
 # ==============================================================
 # 1. AYAR PANELİ
@@ -99,7 +93,7 @@ def log_error(context: str, error: Exception, extra: str = ""):
             header=not os.path.exists(FILES["ERROR_LOG"]),
             index=False
         )
-        console.print(f"[bold red]⚠️ HATA [{context}]:[/] {type(error).__name__}: {str(error)[:120]}")
+        pass  # Hata sadece CSV'ye yazılıyor, Railway log flood olmasın
     except Exception:
         pass  # Loglama kendisi patlarsa yapacak bir şey yok
 
@@ -116,7 +110,7 @@ class HunterState:
         self.is_scanning = False
         self.ranking_data = {}
         self.cooldowns = {}
-        self.market_direction = "[dim]Hesaplaniyor...[/]"
+        self.market_direction_text = "Hesaplaniyor..."
         self.market_direction_text = "Hesaplanıyor..."
         self.missed_this_scan = 0
         self.hourly_missed_signals = 0
@@ -183,7 +177,7 @@ state = HunterState()
 # 4. YARDIMCI FONKSİYONLAR
 # ==============================================================
 def clear_terminal():
-    os.system('cls' if os.name == 'nt' else 'clear')
+    pass  # Railway'de terminal temizleme devre dışı — log flood yapar
 
 def get_tr_time() -> datetime:
     return datetime.utcnow() + timedelta(hours=3)
@@ -281,7 +275,7 @@ def gunluk_dump_gonder():
             mesaj    = f"[{i}/{len(dosyalar)}] {orijinal_ad} → {boyut_kb} KB"
 
             send_ntfy_file(filepath, tarihli_ad, mesaj)
-            console.print(f"[dim green]📤 Gönderildi:[/] {tarihli_ad} ({boyut_kb} KB)")
+            pass  # dosya gönderildi, log flood olmasın
             time.sleep(1.5)   # ntfy rate-limit koruma
         except Exception as e:
             log_error("gunluk_dump_gonder", e, filepath)
@@ -302,7 +296,7 @@ def safe_api_get(url: str, params=None, retries=5):
             if r.status_code == 200:
                 return r.json()
             elif r.status_code == 429:
-                console.print(f"[bold yellow]⚠️ 429 Rate Limit — {attempt+1}. deneme, bekleniyor...[/]")
+                pass  # 429 bekleniyor
                 time.sleep(10)
             else:
                 time.sleep(2)
@@ -706,87 +700,55 @@ def create_trade_chart(df, sym, pos, is_entry=False, curr_c=None, pnl=0.0, close
 # ==============================================================
 # 12. DASHBOARD
 # ==============================================================
+def log_print(msg: str):
+    """Zaman damgalı düz print — Railway loglarında okunması kolay."""
+    zaman = get_tr_time().strftime('%H:%M:%S')
+    print(f"[{zaman}] {msg}", flush=True)
+
+
 def draw_fund_dashboard():
-    clear_terminal()
-    strategy_text = (
-        "[bold cyan]🎯 STRATEJİ (v85.0):[/] ST Flip + RSI9 + VOL>1.42x + EMA20 + ADX>22 + ATR>0.85%\n"
-        f"[bold yellow]🏆 MAX {CONFIG['MAX_POSITIONS']} POZ | Dinamik Risk: {state.dynamic_trade_size:.1f}$ | 30dk max hold[/]\n"
-        f"[bold magenta]🌍 PİYASA YÖNÜ:[/] {state.market_direction} "
-        f"| BTC ATR%: {state.btc_atr_pct:.3f} | BTC RSI: {state.btc_rsi:.1f} | BTC ADX: {state.btc_adx:.1f}\n"
-        f"[dim]Scan ID: {state.scan_id} | Enterprise: Crash Guard + Max Logging + Walk-Forward Ready[/]"
-    )
-    console.print(Panel(strategy_text, title="[bold magenta]🛠️ RBD-CRYPT v85.0 QUANT ENGINE[/]", border_style="magenta"))
-
+    """Her 10 coinde bir çağrılır. Düz log satırları yazar."""
     tot_trd, wins, b_wr, pf, max_dd = get_advanced_metrics()
-    bal_color = "bold bright_green" if state.balance >= CONFIG["STARTING_BALANCE"] else "bold bright_red"
-    history_text = (
-        f"[dim white]Kasa:[/] [{bal_color}]${state.balance:.2f}[/] (Başlangıç: ${CONFIG['STARTING_BALANCE']}) | "
-        f"[dim white]Tepe:[/] [bold cyan]${state.peak_balance:.2f}[/]\n"
-        f"[dim white]İşlem Başarısı:[/] [bold cyan]{wins} / {tot_trd} (%{b_wr})[/] | "
-        f"[dim white]Profit Factor:[/] {pf} | [dim white]Max DD:[/] %{max_dd:.2f}"
-    )
-    console.print(Panel(history_text, title="[bold yellow]📜 KASA VE PERFORMANS[/]", border_style="yellow"))
+    kasa_ok = "+" if state.balance >= CONFIG["STARTING_BALANCE"] else "-"
 
+    print("-" * 70, flush=True)
+    log_print(f"RBD-CRYPT v85.0 | Scan #{state.scan_id}")
+    log_print(f"PIYASA : {state.market_direction_text} | BTC ATR%: {state.btc_atr_pct:.3f} | BTC RSI: {state.btc_rsi:.1f} | BTC ADX: {state.btc_adx:.1f}")
+    log_print(f"KASA   : ${state.balance:.2f} ({kasa_ok}) | Tepe: ${state.peak_balance:.2f} | Risk/islem: ${state.dynamic_trade_size:.1f}")
+    log_print(f"PERFORMANS: {wins}/{tot_trd} islem (%{b_wr} basari) | PF: {pf} | Max DD: %{max_dd:.2f}")
+
+    # Aktif pozisyonlar
     if state.active_positions:
-        act_table = Table(expand=True, header_style="bold cyan", show_lines=True)
-        for col in ["Coin", "Yön", "Süre", "PnL (%)", "Giriş", "TP", "SL"]:
-            act_table.add_column(col)
+        log_print(f"ACIK POZISYONLAR ({len(state.active_positions)}/{CONFIG['MAX_POSITIONS']}):")
         for sym, pos in state.active_positions.items():
-            curr_pnl  = pos.get('curr_pnl', 0.0)
-            pnl_color = "bright_green" if curr_pnl > 0 else "bright_red" if curr_pnl < 0 else "white"
+            curr_pnl = pos.get('curr_pnl', 0.0)
             dur = str(get_tr_time() - datetime.strptime(pos['full_time'], '%Y-%m-%d %H:%M:%S')).split('.')[0]
-            act_table.add_row(
-                f"[bold white]{sym}[/]",
-                "[bold bright_green]LONG[/]" if pos.get('dir') == 'LONG' else "[bold bright_red]SHORT[/]",
-                dur,
-                f"[bold {pnl_color}]{curr_pnl:.2f}%[/]",
-                str(round(pos.get('entry_p', 0), 5)),
-                str(round(pos.get('tp', 0), 5)),
-                str(round(pos.get('sl', 0), 5))
-            )
-        console.print(Panel(act_table, title=f"[bold bright_green]🟢 AKTİF İŞLEMLER ({len(state.active_positions)})[/]", border_style="bright_green"))
+            yon  = "LONG" if pos.get('dir') == 'LONG' else "SHORT"
+            isaret = "+" if curr_pnl >= 0 else ""
+            log_print(f"  >> {sym} {yon} | Sure: {dur} | PnL: {isaret}{curr_pnl:.2f}% | Giris: {pos.get('entry_p',0):.5f} | TP: {pos.get('tp',0):.5f} | SL: {pos.get('sl',0):.5f}")
     else:
-        console.print(Panel("[dim]Şu an açık pozisyon bulunmuyor...[/]", title="[bold white]⚪ AKTİF İŞLEM YOK[/]", border_style="dim white"))
+        log_print(f"ACIK POZISYON: Yok (0/{CONFIG['MAX_POSITIONS']})")
 
-    # ── Son Sinyaller Tablosu ─────────────────────────────────
+    # Son sinyaller
     if state.son_sinyaller:
-        sig_table = Table(expand=True, header_style="bold magenta", show_lines=True)
-        for col in ["Zaman", "Coin", "Sinyal", "Durum", "Neden", "Power", "RSI", "ADX", "VOL"]:
-            sig_table.add_column(col)
+        log_print(f"SON SINYALLER (son {min(8, len(state.son_sinyaller))}):")
         for s in state.son_sinyaller[-8:]:
-            durum_renk = "bold bright_green" if s["entered"] else "bold bright_red"
-            durum_txt  = "✅ GİRİLDİ" if s["entered"] else "⛔ REDDEDİLDİ"
-            sig_renk   = "bright_green" if s["signal"] == "LONG" else "bright_red"
-            sig_table.add_row(
-                f"[dim]{s['zaman']}[/]",
-                f"[bold white]{s['coin']}[/]",
-                f"[bold {sig_renk}]{s['signal']}[/]",
-                f"[{durum_renk}]{durum_txt}[/]",
-                f"[dim yellow]{s['reason']}[/]",
-                f"[cyan]{s['power']}[/]",
-                f"[white]{s['rsi']}[/]",
-                f"[white]{s['adx']}[/]",
-                f"[white]{s['vol']}[/]",
-            )
-        console.print(Panel(sig_table, title=f"[bold magenta]📋 SON SİNYALLER (Son {len(state.son_sinyaller[-8:])})[/]", border_style="magenta"))
+            durum = "GIRILDI" if s["entered"] else f"REDDEDILDI({s['reason']})"
+            log_print(f"  {s['zaman']} {s['coin']:15s} {s['signal']:5s} | {durum:30s} | Power:{s['power']:5.0f} RSI:{s['rsi']:5.1f} ADX:{s['adx']:5.1f} VOL:{s['vol']:.2f}x")
     else:
-        console.print(Panel("[dim]Henüz sinyal tespit edilmedi...[/]", title="[bold white]📋 SON SİNYALLER[/]", border_style="dim white"))
+        log_print("SON SINYALLER: Henuz sinyal tespit edilmedi.")
 
+    # Tarama ilerlemesi
     if state.is_scanning:
-        # Progress bar
-        total    = state.total_count if state.total_count > 0 else 1
-        done     = state.processed_count
-        pct      = int((done / total) * 100)
-        bar_len  = 40
-        filled   = int(bar_len * done / total)
-        bar      = "█" * filled + "░" * (bar_len - filled)
-        console.print(
-            f"\n📡 [bold yellow]{state.status}[/]\n"
-            f"   [bold bright_green]{bar}[/] [bold white]{pct}%[/] "
-            f"([bold bright_green]{done}/{total}[/]) | Coin: [bold cyan]{state.current_coin}[/]"
-        )
+        total  = state.total_count if state.total_count > 0 else 1
+        done   = state.processed_count
+        pct    = int((done / total) * 100)
+        filled = int(20 * done / total)
+        bar    = "#" * filled + "." * (20 - filled)
+        log_print(f"TARAMA : [{bar}] %{pct} ({done}/{total}) | Simdi: {state.current_coin}")
     else:
-        console.print(f"\n📡 [bold bright_green]{state.status}[/]")
+        log_print(f"DURUM  : {state.status}")
+    print("-" * 70, flush=True)
 
 # ==============================================================
 # NTFY KOMUT DİNLEYİCİSİ
@@ -800,7 +762,7 @@ def ntfy_komut_dinle():
       status — durum ile aynı (alias)
     """
     url = f"https://ntfy.sh/{CONFIG['NTFY_TOPIC']}/sse"
-    console.print("[dim cyan]📻 NTFY Komut Dinleyici başlatıldı...[/]")
+    pass  # NTFY Komut Dinleyici başlatıldı
 
     while True:
         try:
@@ -814,7 +776,7 @@ def ntfy_komut_dinle():
                     try:
                         payload = json.loads(line[5:].strip())
                         mesaj   = payload.get('message', '').strip().lower()
-                        console.print(f"[dim cyan]📻 NTFY Komut:[/] {mesaj}")
+                        # console.print kaldırıldı — Railway log limiti
 
                         if mesaj == 'logs':
                             send_ntfy_notification(
@@ -874,11 +836,9 @@ def run_bot_cycle():
     state.is_chop_market = btc_ctx["atr_pct"] < CONFIG["BTC_VOL_THRESHOLD"]
 
     if state.is_chop_market:
-        state.market_direction      = "[bold bright_red]CHOP MARKET (BTC Düşük Vol - SADECE VERİ TOPLANIYOR)[/]"
-        state.market_direction_text = "CHOP MARKET (Düşük Volatilite)"
+        state.market_direction_text = "CHOP MARKET (Dusuk Volatilite)"
     else:
-        state.market_direction      = "[bold bright_green]YÜKSELİŞ (LONG)[/]" if btc_ctx["trend"] == 1 else "[bold bright_red]DÜŞÜŞ (SHORT)[/]"
-        state.market_direction_text = "YÜKSELİŞ (LONG)" if btc_ctx["trend"] == 1 else "DÜŞÜŞ (SHORT)"
+        state.market_direction_text = "YUKSELIS (LONG)" if btc_ctx["trend"] == 1 else "DUSUS (SHORT)"
 
     # Piyasa context'ini logla
     log_market_context(btc_ctx, len(coins), len(state.active_positions))
@@ -907,7 +867,9 @@ def run_bot_cycle():
             df = fetched_data.get(sym)
             state.current_coin  = sym
             state.processed_count += 1
-            draw_fund_dashboard()
+            # Her 10 coinde bir çiz — Railway 500 log/sn limitini aşmamak için
+            if state.processed_count % 10 == 1 or state.processed_count == state.total_count:
+                draw_fund_dashboard()
 
             if df is None or len(df) < 50:
                 continue
@@ -1192,7 +1154,7 @@ def run_bot_cycle():
 
     state.status = (
         f"💤 SENKRON BEKLEME (Sonraki Tarama: "
-        f"[bold bright_green]{target.strftime('%H:%M:%S')}[/] | "
+        f"{target.strftime('%H:%M:%S')} | "
         f"Bu Scan Kaçırılan: {state.missed_this_scan})"
     )
     draw_fund_dashboard()
@@ -1233,7 +1195,7 @@ if __name__ == "__main__":
                 f"30 Saniye içinde kendini onarıp tekrar başlayacak."
             )
             log_error("MAIN_LOOP", e)
-            console.print(f"\n[bold red on white] 🚨 CRITICAL ERROR: {e} [/]")
+            log_print(f"CRITICAL ERROR: {e}")
             send_ntfy_notification(
                 "🚨 SİSTEM ÇÖKTÜ (RESTART ATILIYOR)",
                 error_msg, tags="rotating_light,warning", priority="5"
