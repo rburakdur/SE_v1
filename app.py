@@ -338,10 +338,11 @@ def get_live_futures_data(symbol: str, limit=300):
 # 7. İNDİKATÖRLER
 # ==============================================================
 def hesapla_indikatorler(df: pd.DataFrame) -> pd.DataFrame:
-    c = df['close'].values
-    h = df['high'].values
-    l = df['low'].values
-    v = df['volume'].values
+    # talib float64 zorunlu — Binance bazen object/float32 döner, cast şart
+    c = df['close'].values.astype(float)
+    h = df['high'].values.astype(float)
+    l = df['low'].values.astype(float)
+    v = df['volume'].values.astype(float)
 
     df['RSI']       = talib.RSI(c, CONFIG["RSI_PERIOD"])
     df['ADX']       = talib.ADX(h, l, c, 14)
