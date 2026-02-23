@@ -62,7 +62,8 @@ CONFIG = {
     "MAX_HOLD_MINUTES": 30,
     "MAX_HOLD_ST_GRACE_BARS": 2,    # YENİ: timeout dolunca ST flip için +2 bar tolerans
     "CHOP_ADX_THRESHOLD": 18,
-    "BTC_VOL_THRESHOLD": 0.3,
+    "BTC_VOL_THRESHOLD": 0.18,
+    "MIN_POWER_SCORE": 40,
     "TARGET_MINUTES": [1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56],
     "MAX_LOG_SIZE_BYTES": 50_000_000
 }
@@ -313,9 +314,15 @@ def safe_api_get(url: str, params=None, retries=5):
 def get_top_futures_coins(limit=30) -> list:
     data = safe_api_get("https://fapi.binance.com/fapi/v1/ticker/24hr")
     if data:
+        def is_ascii_clean(s):
+            try: s.encode('ascii'); return True
+            except UnicodeEncodeError: return False
+
         usdt_pairs = [
             d for d in data
-            if d['symbol'].endswith('USDT') and '_' not in d['symbol']
+            if d['symbol'].endswith('USDT')
+            and '_' not in d['symbol']
+            and is_ascii_clean(d['symbol'])   # Çince/unicode karakterli coin filtresi
         ]
         return [
             p['symbol']
@@ -1056,7 +1063,9 @@ def run_bot_cycle():
                 power_score  = hesapla_power_score(row_closed)
                 signal_score = hesapla_signal_score(row_closed)
 
-                if state.is_chop_market:
+                if power_score < CONFIG["MIN_POWER_SCORE"]:
+                    reason = f"LOW_POWER_{power_score:.0f}"
+                elif state.is_chop_market:
                     reason = "CHOP_MARKET"
                 elif signal == "LONG" and btc_ctx["trend"] != 1:
                     reason = "BTC_TREND_KOTU"
