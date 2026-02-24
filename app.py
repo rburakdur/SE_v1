@@ -1,14 +1,14 @@
 # ====================== RBD-CRYPT v86.0 Quant Research Engine ======================
 # v84.1'den v86.0'a degişiklikler:
-#   - Tum 'except: pass' kaldırıldı, her hata error_log.csv'ye yazılıyor
-#   - MIN_ATR_PERCENT filtresi gercekten uygulanıyor
-#   - score / power_score hesaplamaları gercek (walk-forward'a hazır)
-#   - hunter_history.csv: 20+ yeni kolon (bar detayı, market context, indicator snapshot)
-#   - all_signals.csv: genişletildi, her sinyalin tam fotografı
+#   - Tum 'except: pass' kaldirildi, her hata error_log.csv'ye yaziliyor
+#   - MIN_ATR_PERCENT filtresi gercekten uygulaniyor
+#   - score / power_score hesaplamalari gercek (walk-forward'a hazir)
+#   - hunter_history.csv: 20+ yeni kolon (bar detayi, market context, indicator snapshot)
+#   - all_signals.csv: genişletildi, her sinyalin tam fotografi
 #   - market_context.csv: her scan'in BTC/piyasa durumu
-#   - error_log.csv: sessiz hataları yakalıyor
-#   - Timeout cıkışında ST flip varsa onu bekle (MAX_HOLD + 2 bar tolerans)
-#   - Cooldown sonrası missed sinyal detayı loglanıyor
+#   - error_log.csv: sessiz hatalari yakaliyor
+#   - Timeout cikişinda ST flip varsa onu bekle (MAX_HOLD + 2 bar tolerans)
+#   - Cooldown sonrasi missed sinyal detayi loglaniyor
 # ===================================================================================
 
 import pandas as pd
@@ -24,6 +24,7 @@ import gc
 import traceback
 import concurrent.futures
 import threading
+import base64
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -49,7 +50,7 @@ CONFIG = {
     "RSI_SHORT": 38,
     "VOL_FILTER": 1.42,
     "ADX_THRESHOLD": 22,
-    "MIN_ATR_PERCENT": 0.85,        # Artık gercekten kullanılıyor
+    "MIN_ATR_PERCENT": 0.85,        # Artik gercekten kullaniliyor
     "SL_M": 1.65,
     "TP_M": 2.55,
     "COOLDOWN_MINUTES": 20,
@@ -75,13 +76,13 @@ if not os.path.exists(CONFIG["BASE_PATH"]):
     os.makedirs(CONFIG["BASE_PATH"], exist_ok=True)
 
 # ==============================================================
-# 2. HATA LOGLAMA (Sessiz hataları yakala)
+# 2. HATA LOGLAMA (Sessiz hatalari yakala)
 # ==============================================================
 def get_tr_time() -> datetime:
     return datetime.utcnow() + timedelta(hours=3)
 
 def log_error(context: str, error: Exception, extra: str = ""):
-    """Her exception'ı error_log.csv'ye yazar. Hicbir hata kaybolmaz."""
+    """Her exception'i error_log.csv'ye yazar. Hicbir hata kaybolmaz."""
     try:
         row = {
             'timestamp':  get_tr_time().isoformat(),
@@ -117,13 +118,13 @@ class HunterState:
         self.peak_balance = CONFIG["STARTING_BALANCE"]
         self.last_heartbeat_hour = (datetime.utcnow() + timedelta(hours=3)).hour
         self.last_dump_day = -1
-        # BTC context — her scan guncellenir, loglarda kullanılır
+        # BTC context — her scan guncellenir, loglarda kullanilir
         self.btc_atr_pct = 0.0
         self.btc_rsi = 0.0
         self.btc_adx = 0.0
         self.btc_vol_ratio = 0.0
         self.is_chop_market = False
-        self.scan_id = 0  # Her scan'e benzersiz ID, logları birbirine baglar
+        self.scan_id = 0  # Her scan'e benzersiz ID, loglari birbirine baglar
         self.son_sinyaller = []   # Son 8 sinyal — dashboard'da gosterilir
         self.load_state()
 
@@ -136,14 +137,14 @@ class HunterState:
         try:
             with open(FILES["ACTIVE"], 'r') as f:
                 raw = json.load(f)
-            # Restart sonrası pozisyon kurtarma:
-            # full_time'ı şimdiki zamana sıfırla ki timeout anında tetiklenmesin.
-            # Gercek giriş fiyatı, SL, TP korunuyor — sadece sure sayacı resetleniyor.
+            # Restart sonrasi pozisyon kurtarma:
+            # full_time'i şimdiki zamana sifirla ki timeout aninda tetiklenmesin.
+            # Gercek giriş fiyati, SL, TP korunuyor — sadece sure sayaci resetleniyor.
             now_str = (datetime.utcnow() + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S')
             recovered = 0
             for sym, pos in raw.items():
                 if 'entry_p' in pos and 'sl' in pos and 'tp' in pos:
-                    pos['full_time']      = now_str   # sure sayacını resetle
+                    pos['full_time']      = now_str   # sure sayacini resetle
                     pos['restarted']      = True       # log icin işaretle
                     pos.setdefault('curr_pnl', 0.0)
                     pos.setdefault('curr_p', pos['entry_p'])
@@ -202,33 +203,46 @@ def rotate_logs():
 # ==============================================================
 # 5. BILDIRIM MODuLu
 # ==============================================================
+import base64 # Bunu en uste importlarin yanina ekle
+
+# ==============================================================
+# 5. BILDIRIM MODULU
+# ==============================================================
 def send_ntfy_notification(title: str, message: str, image_buf=None, tags="robot", priority="3"):
     url = f"https://ntfy.sh/{CONFIG['NTFY_TOPIC']}"
-    # Header degerleri str olmalı — bytes gecilirse requests sessizce hata uretir
+    
+    # Ntfy'nin HTTP Header'larinda UTF-8 (Emoji ve Turkce karakter) desteklemesi icin
+    # en saglikli yontem RFC-2047 formatinda Base64 ile encode etmektir. 
+    b64_title = base64.b64encode(title.encode('utf-8')).decode('ascii')
+    
     headers = {
-        "Title":    title,
-        "Tags":     tags,
+        "Title": f"=?UTF-8?B?{b64_title}?=",
+        "Tags": tags,
         "Priority": str(priority)
     }
     try:
         if image_buf:
+            # Resim varken mesaj mecburen Header'da gider
+            safe_msg = message.replace('\n', ' | ')
+            b64_msg = base64.b64encode(safe_msg.encode('utf-8')).decode('ascii')
+            headers["Message"] = f"=?UTF-8?B?{b64_msg}?="
             headers["Filename"] = "chart.png"
-            headers["Message"]  = message.replace('\n', ' | ')
-            requests.post(url, data=image_buf.getvalue(), headers=headers, timeout=10)
+            requests.post(url, data=image_buf.getvalue(), headers=headers, timeout=12)
         else:
-            requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=10)
+            # Resim yoksa mesaj BODY'de gider (UTF-8 direkt destekler)
+            requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=12)
     except Exception as e:
+        print(f"!!! NTFY Hatasi: {e}")
         log_error("send_ntfy_notification", e, title)
 
 def send_ntfy_file(filepath: str, filename: str, message: str = ""):
-    """
-    Tek bir dosyayı ntfy'ye PUT ile gonderir.
-    filename parametresi zaten tarih eki icermeli (gunluk dump bunu halleder).
-    """
     url = f"https://ntfy.sh/{CONFIG['NTFY_TOPIC']}"
     headers = {"Filename": filename}
     if message:
-        headers["Message"] = message  # str olmalı, bytes degil
+        safe_msg = message.replace('\n', ' | ')
+        b64_msg = base64.b64encode(safe_msg.encode('utf-8')).decode('ascii')
+        headers["Message"] = f"=?UTF-8?B?{b64_msg}?="
+        
     try:
         with open(filepath, 'rb') as f:
             requests.put(url, data=f, headers=headers, timeout=30)
@@ -238,17 +252,17 @@ def send_ntfy_file(filepath: str, filename: str, message: str = ""):
 
 def gunluk_dump_gonder():
     """
-    BASE_PATH altındaki TuM dosyaları (ve bir seviye alt klasorleri) ntfy'ye gonderir.
-    Her dosyanın adına tarih eki eklenir:  hunter_history_2026-02-23.csv
-    JSON ve CSV'ler sırayla, aralarında 1s beklenerek gonderilir (spam engeli).
+    BASE_PATH altindaki TuM dosyalari (ve bir seviye alt klasorleri) ntfy'ye gonderir.
+    Her dosyanin adina tarih eki eklenir:  hunter_history_2026-02-23.csv
+    JSON ve CSV'ler sirayla, aralarinda 1s beklenerek gonderilir (spam engeli).
     """
     tarih_str = get_tr_time().strftime('%Y-%m-%d')
     base      = CONFIG["BASE_PATH"]
 
-    # BASE_PATH altındaki tum dosyaları topla (recursive, _old_ arşivleri dahil degil)
+    # BASE_PATH altindaki tum dosyalari topla (recursive, _old_ arşivleri dahil degil)
     dosyalar = []
     for root, dirs, files in os.walk(base):
-        # _old_ arşivleri ve temp dosyaları atla
+        # _old_ arşivleri ve temp dosyalari atla
         files = [f for f in files if not f.endswith('.tmp') and '_old_' not in f]
         for fname in sorted(files):
             dosyalar.append(os.path.join(root, fname))
@@ -256,7 +270,7 @@ def gunluk_dump_gonder():
     if not dosyalar:
         send_ntfy_notification(
             f"📦 Gunluk Dokum ({tarih_str})",
-            "BASE_PATH icinde gonderilecek dosya bulunamadı.",
+            "BASE_PATH icinde gonderilecek dosya bulunamadi.",
             tags="warning", priority="3"
         )
         return
@@ -267,13 +281,13 @@ def gunluk_dump_gonder():
         for d in dosyalar
     )
     send_ntfy_notification(
-        f"📦 Gunluk Dokum Başlıyor ({tarih_str})",
+        f"📦 Gunluk Dokum Başliyor ({tarih_str})",
         f"Toplam {len(dosyalar)} dosya gonderilecek:\n{dosya_listesi}",
         tags="package,floppy_disk", priority="4"
     )
     time.sleep(2)
 
-    # Dosyaları sırayla gonder
+    # Dosyalari sirayla gonder
     for i, filepath in enumerate(dosyalar, 1):
         try:
             orijinal_ad = os.path.basename(filepath)
@@ -289,8 +303,8 @@ def gunluk_dump_gonder():
             log_error("gunluk_dump_gonder", e, filepath)
 
     send_ntfy_notification(
-        f"✅ Gunluk Dokum Tamamlandı ({tarih_str})",
-        f"Tum {len(dosyalar)} dosya başarıyla gonderildi. Iyi geceler patron 🌙",
+        f"✅ Gunluk Dokum Tamamlandi ({tarih_str})",
+        f"Tum {len(dosyalar)} dosya başariyla gonderildi. Iyi geceler patron 🌙",
         tags="white_check_mark,moon", priority="3"
     )
 
@@ -356,7 +370,7 @@ def hesapla_indikatorler(df: pd.DataFrame) -> pd.DataFrame:
 
     df['RSI']       = talib.RSI(c, CONFIG["RSI_PERIOD"])
     df['ADX']       = talib.ADX(h, l, c, 14)
-    df['PLUS_DI']   = talib.PLUS_DI(h, l, c, 14)   # YENI: DI farkı data icin
+    df['PLUS_DI']   = talib.PLUS_DI(h, l, c, 14)   # YENI: DI farki data icin
     df['MINUS_DI']  = talib.MINUS_DI(h, l, c, 14)  # YENI
     df['EMA20']     = talib.EMA(c, 20)
     df['EMA50']     = talib.EMA(c, 50)              # YENI: trend derinligi
@@ -375,7 +389,7 @@ def hesapla_indikatorler(df: pd.DataFrame) -> pd.DataFrame:
 
     for i in range(1, len(c)):
         if np.isnan(atr_st[i]) or np.isnan(hl2[i]):
-            # ATR henuz hesaplanamadı (ilk N bar) — onceki degeri koru
+            # ATR henuz hesaplanamadi (ilk N bar) — onceki degeri koru
             st_line[i] = st_line[i-1]
             trend[i]   = trend[i-1]
             continue
@@ -409,9 +423,9 @@ def hesapla_indikatorler(df: pd.DataFrame) -> pd.DataFrame:
 # ==============================================================
 def hesapla_power_score(row) -> float:
     """
-    0-100 arası sinyal gucu skoru.
-    Walk-forward analizinde hangi skorların karlı oldugunu gormek icin kullanılır.
-    Alt bileşenler de loglanıyor.
+    0-100 arasi sinyal gucu skoru.
+    Walk-forward analizinde hangi skorlarin karli oldugunu gormek icin kullanilir.
+    Alt bileşenler de loglaniyor.
     """
     score = 0.0
 
@@ -440,7 +454,7 @@ def hesapla_power_score(row) -> float:
     elif bool(row['FLIP_SHORT']) and float(row['MACD_HIST']) < 0:
         score += 10
 
-    # BB genişligi (0-5) — sıkışık piyasayı cezalandır
+    # BB genişligi (0-5) — sikişik piyasayi cezalandir
     bb_width = (float(row['BBANDS_UP']) - float(row['BBANDS_LOW'])) / max(float(row['BBANDS_MID']), 1e-10) * 100
     bb_component = max(0, min(5, bb_width * 0.5))
     score += bb_component
@@ -449,7 +463,7 @@ def hesapla_power_score(row) -> float:
 
 def hesapla_signal_score(row) -> int:
     """
-    Kac koşul saglandı (0-6). Basit sayım, gucu degil adeti verir.
+    Kac koşul saglandi (0-6). Basit sayim, gucu degil adeti verir.
     """
     flip_long  = bool(row['FLIP_LONG'])
     flip_short = bool(row['FLIP_SHORT'])
@@ -464,7 +478,7 @@ def hesapla_signal_score(row) -> int:
     return sum(checks)
 
 def sinyal_kontrol(row):
-    # pandas Series'te bool degerleri .get() degil bool() ile alınmalı
+    # pandas Series'te bool degerleri .get() degil bool() ile alinmali
     flip_long  = bool(row['FLIP_LONG'])
     flip_short = bool(row['FLIP_SHORT'])
     atr_ok     = bool((row['ATR_14'] / row['close'] * 100) >= CONFIG["MIN_ATR_PERCENT"])
@@ -521,7 +535,7 @@ def get_btc_context() -> dict:
 # 10. LOGLAMA
 # ==============================================================
 def log_trade_to_csv(trade_dict: dict):
-    """Kapanan işlemi hunter_history.csv'ye yazar. Append mode — tum dosyayı okumaz."""
+    """Kapanan işlemi hunter_history.csv'ye yazar. Append mode — tum dosyayi okumaz."""
     try:
         pd.DataFrame([trade_dict]).to_csv(
             FILES["LOG"], mode='a',
@@ -535,10 +549,10 @@ def log_potential_signal(sym: str, signal_type: str, row, score: int,
                           power_score: float, entered: bool, reason: str = "",
                           btc_ctx: dict = None):
     """
-    all_signals.csv — Her tespit edilen sinyalin tam fotografı.
+    all_signals.csv — Her tespit edilen sinyalin tam fotografi.
     Girişe donuşsun ya da donuşmesin, tum koşullar kaydediliyor.
-    Walk-forward: 'tradable=False' ama karlı olan sinyaller
-    parametre ayarı icin altın madeni.
+    Walk-forward: 'tradable=False' ama karli olan sinyaller
+    parametre ayari icin altin madeni.
     """
     if btc_ctx is None:
         btc_ctx = {}
@@ -616,8 +630,8 @@ def log_potential_signal(sym: str, signal_type: str, row, score: int,
 
 def log_market_context(btc_ctx: dict, coin_count: int, open_pos: int):
     """
-    market_context.csv — Her scan'in başındaki piyasa snapshot'ı.
-    Hangi market koşullarında ne kadar sinyal uretildigini analiz etmek icin.
+    market_context.csv — Her scan'in başindaki piyasa snapshot'i.
+    Hangi market koşullarinda ne kadar sinyal uretildigini analiz etmek icin.
     """
     try:
         row = {
@@ -681,7 +695,7 @@ def create_trade_chart(df, sym, pos, is_entry=False, curr_c=None, pnl=0.0, close
 
         ax.vlines(up.index,   up.low,   up.high,   color='#2ecc71', linewidth=1.5, alpha=0.8)
         ax.vlines(down.index, down.low, down.high, color='#e74c3c', linewidth=1.5, alpha=0.8)
-        # Bar genişligini fiyat aralıgına gore dinamik ayarla
+        # Bar genişligini fiyat araligina gore dinamik ayarla
         bar_w = (plot_df.index[-1] - plot_df.index[0]).total_seconds() / len(plot_df) * 0.6 / 86400
         ax.bar(up.index,   up.close   - up.open,   bar_w, bottom=up.open,     color='#2ecc71', alpha=0.9)
         ax.bar(down.index, down.open  - down.close, bar_w, bottom=down.close, color='#e74c3c', alpha=0.9)
@@ -717,13 +731,13 @@ def create_trade_chart(df, sym, pos, is_entry=False, curr_c=None, pnl=0.0, close
 # 12. DASHBOARD
 # ==============================================================
 def log_print(msg: str):
-    """Zaman damgalı duz print — Railway loglarında okunması kolay."""
+    """Zaman damgali duz print — Railway loglarinda okunmasi kolay."""
     zaman = get_tr_time().strftime('%H:%M:%S')
     print(f"[{zaman}] {msg}", flush=True)
 
 
 def draw_fund_dashboard():
-    """Her 10 coinde bir cagrılır. Duz log satırları yazar."""
+    """Her 10 coinde bir cagrilir. Duz log satirlari yazar."""
     tot_trd, wins, b_wr, pf, max_dd = get_advanced_metrics()
     kasa_ok = "+" if state.balance >= CONFIG["STARTING_BALANCE"] else "-"
 
@@ -771,11 +785,11 @@ def draw_fund_dashboard():
 # ==============================================================
 def ntfy_komut_dinle():
     """
-    Ayrı thread'de calışır. ntfy subscribe endpoint'ini dinler.
+    Ayri thread'de calişir. ntfy subscribe endpoint'ini dinler.
     Desteklenen komutlar (ntfy'den mesaj olarak gonder):
-      logs   — tum log dosyalarını hemen gonderir
-      durum  — anlık kasa/pozisyon ozeti
-      status — durum ile aynı (alias)
+      logs   — tum log dosyalarini hemen gonderir
+      durum  — anlik kasa/pozisyon ozeti
+      status — durum ile ayni (alias)
     """
     url = f"https://ntfy.sh/{CONFIG['NTFY_TOPIC']}/sse"
 
@@ -791,7 +805,7 @@ def ntfy_komut_dinle():
                     try:
                         payload = json.loads(line[5:].strip())
                         # Botun kendi gonderdigi bildirimleri yoksay
-                        # (kendi mesajına tepki vermesin)
+                        # (kendi mesajina tepki vermesin)
                         baslik = payload.get('title', '')
                         if any(x in baslik for x in ['ISLEM', 'BASLATILDI', 'coKTu', 
                                                       'Rapor', 'Dokum', 'RESTART', 'Durum']):
@@ -804,8 +818,8 @@ def ntfy_komut_dinle():
 
                         if mesaj == 'logs':
                             send_ntfy_notification(
-                                "📦 Manuel Log Talebi Alındı",
-                                "Dosyalar hazırlanıyor, birazdan gelecek...",
+                                "📦 Manuel Log Talebi Alindi",
+                                "Dosyalar hazirlaniyor, birazdan gelecek...",
                                 tags="package", priority="3"
                             )
                             threading.Thread(target=gunluk_dump_gonder, daemon=True).start()
@@ -818,14 +832,14 @@ def ntfy_komut_dinle():
                                 pozlar += f"  • {sym} {pos['dir']} | PnL: %{pos.get('curr_pnl',0):.2f}\n"
                             durum_msg = (
                                 f"💵 Kasa: ${state.balance:.2f} (Tepe: ${state.peak_balance:.2f})\n"
-                                f"📈 Acık Işlem: {acik}/{CONFIG['MAX_POSITIONS']}\n"
+                                f"📈 Acik Işlem: {acik}/{CONFIG['MAX_POSITIONS']}\n"
                                 f"{pozlar}"
-                                f"🏆 Başarı: {wins}/{tot_trd} (%{b_wr}) | PF: {pf}\n"
+                                f"🏆 Başari: {wins}/{tot_trd} (%{b_wr}) | PF: {pf}\n"
                                 f"🌍 Piyasa: {state.market_direction_text}\n"
                                 f"🔢 Scan ID: {state.scan_id}"
                             )
                             send_ntfy_notification(
-                                f"📊 Anlık Durum ({get_tr_time().strftime('%H:%M')})",
+                                f"📊 Anlik Durum ({get_tr_time().strftime('%H:%M')})",
                                 durum_msg, tags="bar_chart", priority="3"
                             )
 
@@ -834,7 +848,7 @@ def ntfy_komut_dinle():
 
         except Exception as e:
             log_error("ntfy_komut_dinle", e)
-            time.sleep(15)   # baglantı koparsa 15sn bekle yeniden baglan
+            time.sleep(15)   # baglanti koparsa 15sn bekle yeniden baglan
 
 
 
@@ -925,7 +939,7 @@ def run_bot_cycle():
                     grace_ok     = False
 
                     if pos['dir'] == 'LONG' and last_trend == -1:
-                        # ST zaten aleyhte dondu, cık
+                        # ST zaten aleyhte dondu, cik
                         grace_ok = False
                     elif pos['dir'] == 'SHORT' and last_trend == 1:
                         grace_ok = False
@@ -963,7 +977,7 @@ def run_bot_cycle():
                     pnl_usd    = trade_size * (pnl / 100)
                     state.update_balance(pnl, trade_size)
 
-                    # ── Geniş kapanış logu ────────────────────────────
+                    # ── Geniş kapaniş logu ────────────────────────────
                     row_at_close = df.iloc[-2]
                     trade_log = {
                         # Kimlik
@@ -987,14 +1001,14 @@ def run_bot_cycle():
                         'PnL_USD':           round(pnl_usd, 2),
                         'Kasa_Son_Durum':    round(state.balance, 2),
                         'Sonuc':             close_reason,
-                        # Giriş anındaki indikatorler (pos icinden)
+                        # Giriş anindaki indikatorler (pos icinden)
                         'Giris_RSI':         pos.get('entry_rsi', 0),
                         'Giris_ADX':         pos.get('entry_adx', 0),
                         'Giris_VOL_RATIO':   pos.get('entry_vol_ratio', 0),
                         'Giris_ATR_PCT':     pos.get('entry_atr_pct', 0),
                         'Giris_Power_Score': pos.get('power_score', 0),
                         'Giris_Score':       pos.get('signal_score', 0),
-                        # cıkış anındaki indikatorler
+                        # cikiş anindaki indikatorler
                         'Cikis_RSI':         round(float(row_at_close['RSI']), 2),
                         'Cikis_ADX':         round(float(row_at_close['ADX']), 2),
                         'Cikis_VOL_RATIO':   round(float(row_at_close['VOL_RATIO']), 3),
@@ -1033,7 +1047,7 @@ def run_bot_cycle():
 
                     del state.active_positions[sym]
                     state.save_state()
-                    continue  # Aynı scan'de re-entry engeli
+                    continue  # Ayni scan'de re-entry engeli
 
             # ── B. YENI SINYAL ────────────────────────────────────────
             row_closed = df.iloc[-2]
@@ -1080,7 +1094,7 @@ def run_bot_cycle():
                         'curr_pnl':       0.0,
                         'curr_p':         float(df['close'].iloc[-1]),
                         'trade_size':     t_size,
-                        # Giriş anındaki indikatorler — kapanışta loga yazılır
+                        # Giriş anindaki indikatorler — kapanişta loga yazilir
                         'entry_rsi':      round(float(row_closed['RSI']), 2),
                         'entry_adx':      round(float(row_closed['ADX']), 2),
                         'entry_vol_ratio':round(float(row_closed['VOL_RATIO']), 3),
@@ -1148,7 +1162,7 @@ def run_bot_cycle():
             f"🌍 Piyasa Yonu: {state.market_direction_text}\n"
             f"📊 BTC ATR%: {state.btc_atr_pct:.3f} | BTC RSI: {state.btc_rsi:.1f} | BTC ADX: {state.btc_adx:.1f}\n"
             f"⛔ 1 Saatte Reddedilen Sinyal: {state.hourly_missed_signals} adet\n"
-            f"📈 Acık Işlem: {len(state.active_positions)}/{CONFIG['MAX_POSITIONS']}\n"
+            f"📈 Acik Işlem: {len(state.active_positions)}/{CONFIG['MAX_POSITIONS']}\n"
             f"🔢 Scan ID: {state.scan_id}\n"
             f"Sistem stabil, disiplin bozulmuyor patron."
         )
@@ -1162,9 +1176,9 @@ def run_bot_cycle():
     current_day = current_time.day
     if current_hour == 23 and current_time.minute >= 56 and state.last_dump_day != current_day:
         state.last_dump_day = current_day
-        gunluk_dump_gonder()   # BASE_PATH altındaki her şeyi tarihli ad ile gonderir
+        gunluk_dump_gonder()   # BASE_PATH altindaki her şeyi tarihli ad ile gonderir
 
-    # ── Sonraki scan zamanlaması ──────────────────────────────
+    # ── Sonraki scan zamanlamasi ──────────────────────────────
     now    = get_tr_time()
     target = now.replace(second=0, microsecond=0)
     next_m = next((m for m in CONFIG["TARGET_MINUTES"] if m > now.minute), CONFIG["TARGET_MINUTES"][0])
@@ -1175,7 +1189,7 @@ def run_bot_cycle():
     state.status = (
         f"💤 SENKRON BEKLEME (Sonraki Tarama: "
         f"{target.strftime('%H:%M:%S')} | "
-        f"Bu Scan Kacırılan: {state.missed_this_scan})"
+        f"Bu Scan Kacirilan: {state.missed_this_scan})"
     )
     draw_fund_dashboard()
 
@@ -1191,9 +1205,9 @@ if __name__ == "__main__":
         f"💵 Guncel Kasa: ${state.balance:.2f}\n"
         f"🛡️ Global Crash Guard Aktif\n"
         f"📊 Maksimum Loglama Modu: hunter_history + all_signals + market_context + error_log\n"
-        f"🔢 Walk-Forward Hazır: Power Score + Signal Score + Config Snapshot\n"
-        f"💾 Log Rotation & RAM Koruması Devrede\n"
-        f"Scan ID: {state.scan_id} | v86.0 production modunda başlatıldı!"
+        f"🔢 Walk-Forward Hazir: Power Score + Signal Score + Config Snapshot\n"
+        f"💾 Log Rotation & RAM Korumasi Devrede\n"
+        f"Scan ID: {state.scan_id} | v86.0 production modunda başlatildi!"
     )
     log_print("=" * 50)
     log_print("RBD-CRYPT v86.0 BASLATILDI")
@@ -1204,19 +1218,19 @@ if __name__ == "__main__":
         start_msg, tags="rocket,shield", priority="4"
     )
 
-    # NTFY komut dinleyiciyi ayrı thread'de başlat
+    # NTFY komut dinleyiciyi ayri thread'de başlat
     komut_thread = threading.Thread(target=ntfy_komut_dinle, daemon=True)
     komut_thread.start()
 
-    # Restart sonrası acık pozisyonları bildir
+    # Restart sonrasi acik pozisyonlari bildir
     if state.active_positions:
         pozlar = ", ".join(
             f"{sym} {pos['dir']} @ {pos['entry_p']:.5f}"
             for sym, pos in state.active_positions.items()
         )
         send_ntfy_notification(
-            "🔄 RESTART — Pozisyonlar Kurtarıldı",
-            f"{len(state.active_positions)} acık pozisyon devam ediyor:\n{pozlar}\nSure sayacı resetlendi.",
+            "🔄 RESTART — Pozisyonlar Kurtarildi",
+            f"{len(state.active_positions)} acik pozisyon devam ediyor:\n{pozlar}\nSure sayaci resetlendi.",
             tags="arrows_counterclockwise,white_check_mark", priority="4"
         )
 
@@ -1225,10 +1239,10 @@ if __name__ == "__main__":
             run_bot_cycle()
         except Exception as e:
             error_msg = (
-                f"Sistem Hata Aldı ve coktu!\n"
+                f"Sistem Hata Aldi ve coktu!\n"
                 f"Hata: {str(e)[:150]}\n"
                 f"Scan ID: {state.scan_id}\n"
-                f"30 Saniye icinde kendini onarıp tekrar başlayacak."
+                f"30 Saniye icinde kendini onarip tekrar başlayacak."
             )
             log_error("MAIN_LOOP", e)
             log_print(f"CRITICAL ERROR: {e}")
