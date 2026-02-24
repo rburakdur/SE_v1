@@ -1,5 +1,5 @@
-# ====================== RBD-CRYPT v86.0 Quant Research Engine ======================
-# v84.1'den v86.0'a degişiklikler:
+# ====================== RBD-CRYPT v87.0 Quant Research Engine ======================
+# v84.1'den v87.0'a degişiklikler:
 #   - Tum 'except: pass' kaldirildi, her hata error_log.csv'ye yaziliyor
 #   - MIN_ATR_PERCENT filtresi gercekten uygulaniyor
 #   - score / power_score hesaplamalari gercek (walk-forward'a hazir)
@@ -53,8 +53,8 @@ CONFIG = {
     "RISK_PERCENT_PER_TRADE": 25.0,
     "MIN_TRADE_SIZE": 10.0,
     "MAX_TRADE_SIZE": 200.0,
-    "TOP_COINS_LIMIT": 50,
-    "CANDIDATE_TOP_COINS_LIMIT": 80,
+    "TOP_COINS_LIMIT": 100,
+    "CANDIDATE_TOP_COINS_LIMIT": 100,
     "ST_M": 2.8,
     "RSI_PERIOD": 9,
     # Auto-entry (seçici) eşikleri
@@ -120,6 +120,16 @@ if not os.path.exists(CONFIG["BASE_PATH"]):
 def get_tr_time() -> datetime:
     return datetime.utcnow() + timedelta(hours=3)
 
+def get_trading_day_time(now=None) -> datetime:
+    """TR saatinde 03:00 cutoff ile is gunu tarihi dondurur."""
+    now = now or get_tr_time()
+    if now.hour < 3:
+        return now - timedelta(days=1)
+    return now
+
+def get_trading_day_str(now=None) -> str:
+    return get_trading_day_time(now).strftime('%Y-%m-%d')
+
 def log_error(context: str, error: Exception, extra: str = ""):
     """Her exception'i error_log.csv'ye yazar. Hicbir hata kaybolmaz."""
     try:
@@ -178,7 +188,8 @@ class HunterState:
         self.balance = CONFIG["STARTING_BALANCE"]
         self.peak_balance = CONFIG["STARTING_BALANCE"]
         self.last_heartbeat_hour = (datetime.utcnow() + timedelta(hours=3)).hour
-        self.last_dump_day = -1
+        self.last_dump_trading_day = ""
+        self.last_balance_reset_trading_day = ""
         # BTC context — her scan guncellenir, loglarda kullanilir
         self.btc_atr_pct = 0.0
         self.btc_rsi = 0.0
@@ -242,6 +253,8 @@ class HunterState:
                 self.balance      = saved.get("balance", CONFIG["STARTING_BALANCE"])
                 self.peak_balance = saved.get("peak_balance", CONFIG["STARTING_BALANCE"])
                 self.scan_id      = saved.get("scan_id", 0)
+                self.last_dump_trading_day = str(saved.get("last_dump_trading_day", ""))
+                self.last_balance_reset_trading_day = str(saved.get("last_balance_reset_trading_day", ""))
             print(f"[RESTART] State yuklendi — Kasa: ${self.balance:.2f} | Scan ID: {self.scan_id}", flush=True)
         except Exception:
             pass
@@ -253,7 +266,9 @@ class HunterState:
                 json.dump({
                     "balance": float(self.balance),
                     "peak_balance": float(self.peak_balance),
-                    "scan_id": int(self.scan_id)
+                    "scan_id": int(self.scan_id),
+                    "last_dump_trading_day": str(self.last_dump_trading_day or ""),
+                    "last_balance_reset_trading_day": str(self.last_balance_reset_trading_day or "")
                 }, f)
             os.replace(state_temp, FILES["STATE"])
             temp = FILES["ACTIVE"] + ".tmp"
@@ -274,6 +289,32 @@ class HunterState:
         if self.balance > self.peak_balance:
             self.peak_balance = self.balance
         self.save_state()
+
+    def maybe_reset_daily_balance(self, now=None):
+        """Her yeni is gununde (TR 03:00 cutoff) bakiyeyi yeniden baslat."""
+        now = now or get_tr_time()
+        trading_day = get_trading_day_str(now)
+        if self.last_balance_reset_trading_day == trading_day:
+            return False
+        self.balance = float(CONFIG["STARTING_BALANCE"])
+        self.peak_balance = float(CONFIG["STARTING_BALANCE"])
+        self.last_balance_reset_trading_day = trading_day
+        self.save_state()
+        try:
+            send_ntfy_notification(
+                "GERCEK ISLEM | Gunluk Balance Reset",
+                (
+                    f"Is gunu: {trading_day} (TR cutoff 03:00)\n"
+                    f"Yeni kasa: ${self.balance:.2f}\n"
+                    f"Acik Gercek: {len(getattr(self, 'active_positions', {}))} | "
+                    f"Acik Sanal: {len(getattr(self, 'paper_positions', {}))}"
+                ),
+                tags="moneybag,arrows_counterclockwise", priority="3"
+            )
+        except Exception as e:
+            log_error("daily_balance_reset_notify", e, trading_day)
+        print(f"[{now.strftime('%H:%M:%S')}] GUNLUK BALANCE RESET -> {trading_day} | ${self.balance:.2f}", flush=True)
+        return True
 
 state = HunterState()
 
@@ -337,15 +378,15 @@ def format_hourly_report_message(current_time, real_metrics: tuple, virtual_metr
     """Telefon bildiriminde daha temiz gorunen kompakt saatlik rapor."""
     tot_trd, wins, b_wr, pf, max_dd = real_metrics
     v_tot, v_wins, v_wr, v_pf, _ = virtual_metrics
-    title = f"SAATLIK RAPOR | {current_time.strftime('%H:00')}"
+    title = f"RBD-CRYPT v87 | Saatlik {current_time.strftime('%H:00')}"
     body = (
-        f"KASA   ${state.balance:.2f} (Tepe ${state.peak_balance:.2f}) | Pozisyon ${state.dynamic_trade_size:.1f}\n"
-        f"GERCEK {wins}/{tot_trd} | %{b_wr} | PF {pf} | DD %{max_dd:.2f}\n"
-        f"SANAL  {v_wins}/{v_tot} | %{v_wr} | PnL ${v_pnl_usd:.2f} | PF {v_pf}\n"
-        f"BTC    ATR {state.btc_atr_pct:.3f} | RSI {state.btc_rsi:.1f} | ADX {state.btc_adx:.1f}\n"
-        f"PIYASA {state.market_direction_text}\n"
-        f"ACIK   Gercek {len(state.active_positions)}/{CONFIG['MAX_POSITIONS']} | Sanal {len(state.paper_positions)}\n"
-        f"RED(1s) {state.hourly_missed_signals} | Scan {state.scan_id}"
+        f"Kasa ${state.balance:.2f} | Tepe ${state.peak_balance:.2f} | Poz ${state.dynamic_trade_size:.1f}\n"
+        f"Gercek {wins}/{tot_trd} | %{b_wr} | PF {pf} | DD %{max_dd:.2f}\n"
+        f"Sanal {v_wins}/{v_tot} | %{v_wr} | PnL ${v_pnl_usd:.2f} | PF {v_pf}\n"
+        f"BTC ATR {state.btc_atr_pct:.3f} | RSI {state.btc_rsi:.1f} | ADX {state.btc_adx:.1f}\n"
+        f"Piyasa: {state.market_direction_text}\n"
+        f"Acik: Gercek {len(state.active_positions)}/{CONFIG['MAX_POSITIONS']} | Sanal {len(state.paper_positions)}\n"
+        f"Red(1s): {state.hourly_missed_signals} | Scan: {state.scan_id}"
     )
     return title, body
 
@@ -412,7 +453,7 @@ def gunluk_dump_gonder():
     Her dosyanin adina tarih eki eklenir:  hunter_history_2026-02-23.csv
     JSON ve CSV'ler sirayla, aralarinda 1s beklenerek gonderilir (spam engeli).
     """
-    tarih_str = get_tr_time().strftime('%Y-%m-%d')
+    tarih_str = get_trading_day_str()
     base      = CONFIG["BASE_PATH"]
 
     # BASE_PATH altindaki tum dosyalari topla (recursive, _old_ arşivleri dahil degil)
@@ -1151,7 +1192,7 @@ def update_paper_position_for_symbol(sym: str, df: pd.DataFrame, btc_ctx: dict):
             'Trade_Mode':         'VIRTUAL',
             'Scan_ID':            state.scan_id,
             'Restarted':          pos.get('restarted', False),
-            'Tarih':              get_tr_time().strftime('%Y-%m-%d'),
+            'Tarih':              get_trading_day_str(),
             'Giris_Saati':        pos['full_time'].split(' ')[1],
             'Cikis_Saati':        get_tr_time().strftime('%H:%M:%S'),
             'Hold_Dakika':        round(hold_minutes, 1),
@@ -1265,7 +1306,7 @@ def draw_fund_dashboard():
     kasa_ok = "+" if state.balance >= CONFIG["STARTING_BALANCE"] else "-"
 
     print("-" * 70, flush=True)
-    log_print(f"RBD-CRYPT v86.0 | Scan #{state.scan_id}")
+    log_print(f"RBD-CRYPT v87.0 | Scan #{state.scan_id}")
     log_print(f"PIYASA : {state.market_direction_text} | BTC ATR%: {state.btc_atr_pct:.3f} | BTC RSI: {state.btc_rsi:.1f} | BTC ADX: {state.btc_adx:.1f}")
     log_print(f"KASA   : ${state.balance:.2f} ({kasa_ok}) | Tepe: ${state.peak_balance:.2f} | Pozisyon/islem: ${state.dynamic_trade_size:.1f}")
     log_print(f"PERFORMANS: {wins}/{tot_trd} islem (%{b_wr} basari) | PF: {pf} | Max DD: %{max_dd:.2f}")
@@ -1525,7 +1566,7 @@ def run_bot_cycle():
                         'Trade_Mode':         'REAL',
                         'Scan_ID':           state.scan_id,
                         'Restarted':         pos.get('restarted', False),
-                        'Tarih':             get_tr_time().strftime('%Y-%m-%d'),
+                        'Tarih':             get_trading_day_str(),
                         'Giris_Saati':       pos['full_time'].split(' ')[1],
                         'Cikis_Saati':       get_tr_time().strftime('%H:%M:%S'),
                         'Hold_Dakika':       round(hold_minutes, 1),
@@ -1798,6 +1839,7 @@ def run_bot_cycle():
 
     current_time = get_tr_time()
     current_hour = current_time.hour
+    state.maybe_reset_daily_balance(current_time)
 
     # ── Saatlik Rapor ─────────────────────────────────────────
     if current_hour != state.last_heartbeat_hour:
@@ -1832,9 +1874,10 @@ def run_bot_cycle():
         state.hourly_missed_signals = 0
 
     # ── Gunluk Dokum (23:56-23:59) ───────────────────────────
-    current_day = current_time.day
-    if current_hour == 23 and current_time.minute >= 56 and state.last_dump_day != current_day:
-        state.last_dump_day = current_day
+    trading_day = get_trading_day_str(current_time)
+    if current_hour == 2 and current_time.minute >= 56 and state.last_dump_trading_day != trading_day:
+        state.last_dump_trading_day = trading_day
+        state.save_state()
         gunluk_dump_gonder()   # BASE_PATH altindaki her şeyi tarihli ad ile gonderir
 
     # ── Sonraki scan zamanlamasi ──────────────────────────────
@@ -1874,14 +1917,14 @@ if __name__ == "__main__":
         f"📊 Maksimum Loglama Modu: hunter_history + all_signals + market_context + error_log\n"
         f"🔢 Walk-Forward Hazir: Power Score + Signal Score + Config Snapshot\n"
         f"💾 Log Rotation & RAM Korumasi Devrede\n"
-        f"Scan ID: {state.scan_id} | v86.0 production modunda başlatildi!"
+        f"Scan ID: {state.scan_id} | v87.0 production modunda başlatildi!"
     )
     log_print("=" * 50)
-    log_print("RBD-CRYPT v86.0 BASLATILDI")
+    log_print("RBD-CRYPT v87.0 BASLATILDI")
     log_print(f"Kasa: ${state.balance:.2f} | Scan ID: {state.scan_id}")
     log_print("=" * 50)
     send_ntfy_notification(
-        "🚀 v86.0 BASLATILDI",
+        "🚀 v87.0 BASLATILDI",
         start_msg, tags="rocket,shield", priority="4"
     )
 

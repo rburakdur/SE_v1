@@ -1,2 +1,0 @@
-timestamp,coin,signal,score,power_score,rsi,vol_ratio,adx,trend,atr_pct,tradable,blocked_reason
-2026-02-23T01:21:45.041386,XAUUSDT,LONG,5,50187.25,78.25,1.87,37.06,1,0.03,False,CHOP_MARKET
