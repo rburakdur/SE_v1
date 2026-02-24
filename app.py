@@ -54,7 +54,7 @@ CONFIG = {
     "SL_M": 1.65,
     "TP_M": 2.55,
     "COOLDOWN_MINUTES": 20,
-    "MAX_HOLD_MINUTES": 30,
+    "MAX_HOLD_MINUTES": 45,
     "MAX_HOLD_ST_GRACE_BARS": 2,    # YENI: timeout dolunca ST flip icin +2 bar tolerans
     "CHOP_ADX_THRESHOLD": 18,
     "BTC_VOL_THRESHOLD": 0.18,
@@ -169,9 +169,9 @@ class HunterState:
         try:
             with open(FILES["STATE"], 'w') as f:
                 json.dump({
-                    "balance":      self.balance,
-                    "peak_balance": self.peak_balance,
-                    "scan_id":      self.scan_id
+                    "balance": float(self.balance),
+                    "peak_balance": float(self.peak_balance),
+                    "scan_id": int(self.scan_id)
                 }, f)
             temp = FILES["ACTIVE"] + ".tmp"
             with open(temp, 'w') as f:
@@ -363,10 +363,10 @@ def get_live_futures_data(symbol: str, limit=300):
 # ==============================================================
 def hesapla_indikatorler(df: pd.DataFrame) -> pd.DataFrame:
     # talib float64 zorunlu — Binance bazen object/float32 doner, cast şart
-    c = df['close'].values.astype(float)
-    h = df['high'].values.astype(float)
-    l = df['low'].values.astype(float)
-    v = df['volume'].values.astype(float)
+    c = df['close'].values.astype(np.float64)
+    h = df['high'].values.astype(np.float64)
+    l = df['low'].values.astype(np.float64)
+    v = df['volume'].values.astype(np.float64)
 
     df['RSI']       = talib.RSI(c, CONFIG["RSI_PERIOD"])
     df['ADX']       = talib.ADX(h, l, c, 14)
@@ -1157,12 +1157,17 @@ def run_bot_cycle():
     # ── Saatlik Rapor ─────────────────────────────────────────
     if current_hour != state.last_heartbeat_hour:
         state.last_heartbeat_hour = current_hour
+        
+        # Dashboard'daki performans metriklerini cekiyoruz
+        tot_trd, wins, b_wr, pf, max_dd = get_advanced_metrics()
+        
         hb_msg = (
-            f"💵 Kasa: ${state.balance:.2f} (Tepe: ${state.peak_balance:.2f})\n"
-            f"🌍 Piyasa Yonu: {state.market_direction_text}\n"
-            f"📊 BTC ATR%: {state.btc_atr_pct:.3f} | BTC RSI: {state.btc_rsi:.1f} | BTC ADX: {state.btc_adx:.1f}\n"
-            f"⛔ 1 Saatte Reddedilen Sinyal: {state.hourly_missed_signals} adet\n"
-            f"📈 Acik Işlem: {len(state.active_positions)}/{CONFIG['MAX_POSITIONS']}\n"
+            f"💵 Kasa: ${state.balance:.2f} (Tepe: ${state.peak_balance:.2f}) | Risk/islem: ${state.dynamic_trade_size:.1f}\n"
+            f"🌍 Piyasa: {state.market_direction_text}\n"
+            f"📊 BTC -> ATR%: {state.btc_atr_pct:.3f} | RSI: {state.btc_rsi:.1f} | ADX: {state.btc_adx:.1f}\n"
+            f"🏆 Performans: {wins}/{tot_trd} islem (%{b_wr} basari) | PF: {pf} | Max DD: %{max_dd:.2f}\n"
+            f"⛔ Reddedilen Sinyal (1s): {state.hourly_missed_signals} adet\n"
+            f"📈 Acik Islem: {len(state.active_positions)}/{CONFIG['MAX_POSITIONS']}\n"
             f"🔢 Scan ID: {state.scan_id}\n"
             f"Sistem stabil, disiplin bozulmuyor patron."
         )
