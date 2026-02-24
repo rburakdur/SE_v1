@@ -35,6 +35,12 @@ import matplotlib.dates as mdates
 from datetime import datetime, timedelta
 warnings.filterwarnings('ignore')
 
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
 # ==============================================================
 # 1. AYAR PANELI
 # ==============================================================
@@ -86,7 +92,7 @@ CONFIG = {
     "BTC_VOL_THRESHOLD": 0.18,
     "MIN_POWER_SCORE": 40,
     "ENABLE_SHUTDOWN_FLUSH": True,
-    "GITHUB_BACKUP_ENABLED": os.getenv("GITHUB_BACKUP_ENABLED", "false").lower() == "true",
+    "GITHUB_BACKUP_ENABLED": env_bool("GITHUB_BACKUP_ENABLED", False),
     "GITHUB_BACKUP_REPO": os.getenv("GITHUB_BACKUP_REPO", ""),          # owner/repo
     "GITHUB_BACKUP_TOKEN": os.getenv("GITHUB_BACKUP_TOKEN", ""),
     "GITHUB_BACKUP_BRANCH": os.getenv("GITHUB_BACKUP_BRANCH", "main"),
@@ -1220,6 +1226,10 @@ def log_storage_diagnostics():
             log_print(f"  {key}: {'OK' if exists else 'MISSING'} | {p} | {size} bytes")
         log_print(f"  Recovered active positions: {len(getattr(state, 'active_positions', {}))}")
         log_print(f"  Recovered paper positions: {len(getattr(state, 'paper_positions', {}))}")
+        log_print(
+            f"  GitHub backup: {'ENABLED' if CONFIG.get('GITHUB_BACKUP_ENABLED') else 'DISABLED'} | "
+            f"Repo: {CONFIG.get('GITHUB_BACKUP_REPO','-')} | Branch: {CONFIG.get('GITHUB_BACKUP_BRANCH','main')}"
+        )
     except Exception as e:
         log_error("log_storage_diagnostics", e)
 
