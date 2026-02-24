@@ -24,10 +24,6 @@ import gc
 import traceback
 import concurrent.futures
 import threading
-import signal
-import atexit
-import base64
-import zipfile
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -48,28 +44,8 @@ CONFIG = {
     "MIN_TRADE_SIZE": 10.0,
     "MAX_TRADE_SIZE": 200.0,
     "TOP_COINS_LIMIT": 50,
-    "CANDIDATE_TOP_COINS_LIMIT": 80,
     "ST_M": 2.8,
     "RSI_PERIOD": 9,
-    # Auto-entry (seçici) eşikleri
-    "AUTO_ENTRY_RSI_LONG": 62,
-    "AUTO_ENTRY_RSI_SHORT": 38,
-    "AUTO_ENTRY_VOL_FILTER": 1.42,
-    "AUTO_ENTRY_ADX_THRESHOLD": 22,
-    "AUTO_ENTRY_MIN_ATR_PERCENT": 0.85,
-    "AUTO_ENTRY_MIN_POWER_SCORE": 40,
-    # Candidate shortlist (gevşek) eşikleri
-    "CANDIDATE_RSI_LONG": 56,
-    "CANDIDATE_RSI_SHORT": 44,
-    "CANDIDATE_VOL_FILTER": 1.15,
-    "CANDIDATE_ADX_THRESHOLD": 17,
-    "CANDIDATE_MIN_ATR_PERCENT": 0.65,
-    "CANDIDATE_MIN_POWER_SCORE": 28,
-    # Market policy
-    "AUTO_BTC_TREND_MODE": "hard_block",   # hard_block | soft_penalty
-    "AUTO_BTC_TREND_PENALTY": 12.0,
-    "AUTO_CHOP_POLICY": "block",           # block | penalty | allow
-    "AUTO_CHOP_PENALTY": 8.0,
     "RSI_LONG": 62,
     "RSI_SHORT": 38,
     "VOL_FILTER": 1.42,
@@ -85,12 +61,6 @@ CONFIG = {
     "CHOP_ADX_THRESHOLD": 18,
     "BTC_VOL_THRESHOLD": 0.18,
     "MIN_POWER_SCORE": 40,
-    "ENABLE_SHUTDOWN_FLUSH": True,
-    "GITHUB_BACKUP_ENABLED": os.getenv("GITHUB_BACKUP_ENABLED", "false").lower() == "true",
-    "GITHUB_BACKUP_REPO": os.getenv("GITHUB_BACKUP_REPO", ""),          # owner/repo
-    "GITHUB_BACKUP_TOKEN": os.getenv("GITHUB_BACKUP_TOKEN", ""),
-    "GITHUB_BACKUP_BRANCH": os.getenv("GITHUB_BACKUP_BRANCH", "main"),
-    "GITHUB_BACKUP_DIR": os.getenv("GITHUB_BACKUP_DIR", "daily-backups"),
     "TARGET_MINUTES": [1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56],
     "MAX_LOG_SIZE_BYTES": 50_000_000
 }
@@ -98,7 +68,6 @@ CONFIG = {
 FILES = {
     "LOG":             os.path.join(CONFIG["BASE_PATH"], "hunter_history.csv"),
     "ACTIVE":          os.path.join(CONFIG["BASE_PATH"], "active_trades.json"),
-    "PAPER_ACTIVE":    os.path.join(CONFIG["BASE_PATH"], "paper_active_trades.json"),
     "ALL_SIGNALS":     os.path.join(CONFIG["BASE_PATH"], "all_signals.csv"),
     "MARKET_CONTEXT":  os.path.join(CONFIG["BASE_PATH"], "market_context.csv"),   # YENI
     "ERROR_LOG":       os.path.join(CONFIG["BASE_PATH"], "error_log.csv"),         # YENI
@@ -179,7 +148,6 @@ class HunterState:
         self.is_chop_market = False
         self.scan_id = 0  # Her scan'e benzersiz ID, loglari birbirine baglar
         self.son_sinyaller = []   # Son 8 sinyal — dashboard'da gosterilir
-        self.paper_positions = {}
         self.load_state()
 
     @property
@@ -214,21 +182,6 @@ class HunterState:
             self.active_positions = {}
 
         try:
-            with open(FILES["PAPER_ACTIVE"], 'r') as f:
-                raw_paper = json.load(f)
-            now_str = (datetime.utcnow() + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S')
-            for sym, pos in raw_paper.items():
-                if 'entry_p' in pos and 'sl' in pos and 'tp' in pos:
-                    pos['full_time'] = now_str
-                    pos['restarted'] = True
-                    pos.setdefault('curr_pnl', 0.0)
-                    pos.setdefault('curr_p', pos['entry_p'])
-                    pos.setdefault('best_pnl', 0.0)
-            self.paper_positions = raw_paper
-        except Exception:
-            self.paper_positions = {}
-
-        try:
             with open(FILES["STATE"], 'r') as f:
                 saved = json.load(f)
                 self.balance      = saved.get("balance", CONFIG["STARTING_BALANCE"])
@@ -240,24 +193,17 @@ class HunterState:
 
     def save_state(self):
         try:
-            state_temp = FILES["STATE"] + ".tmp"
-            with open(state_temp, 'w') as f:
+            with open(FILES["STATE"], 'w') as f:
                 json.dump({
                     "balance": float(self.balance),
                     "peak_balance": float(self.peak_balance),
                     "scan_id": int(self.scan_id)
                 }, f)
-            os.replace(state_temp, FILES["STATE"])
             temp = FILES["ACTIVE"] + ".tmp"
             safe_positions = json_safe(self.active_positions)
             with open(temp, 'w') as f:
                 json.dump(safe_positions, f)
             os.replace(temp, FILES["ACTIVE"])
-            ptemp = FILES["PAPER_ACTIVE"] + ".tmp"
-            safe_paper = json_safe(self.paper_positions)
-            with open(ptemp, 'w') as f:
-                json.dump(safe_paper, f)
-            os.replace(ptemp, FILES["PAPER_ACTIVE"])
         except Exception as e:
             log_error("save_state", e)
 
@@ -298,7 +244,6 @@ def send_ntfy_notification(title: str, message: str, image_buf=None, tags="robot
             safe_msg = ascii_only(message.replace('\n', ' | '))
             headers["Message"] = safe_msg
             headers["Filename"] = "chart.png"
-            headers["Content-Type"] = "image/png"
             requests.post(url, data=image_buf.getvalue(), headers=headers, timeout=12)
         else:
             # Resim yoksa mesaj BODY'de gider (UTF-8 direkt destekler)
@@ -318,71 +263,6 @@ def send_ntfy_file(filepath: str, filename: str, message: str = ""):
             requests.put(url, data=f, headers=headers, timeout=30)
     except Exception as e:
         log_error("send_ntfy_file", e, filename)
-
-def format_hourly_report_message(current_time, real_metrics: tuple, virtual_metrics: tuple, v_pnl_usd: float) -> tuple[str, str]:
-    """Telefon bildiriminde daha temiz gorunen kompakt saatlik rapor."""
-    tot_trd, wins, b_wr, pf, max_dd = real_metrics
-    v_tot, v_wins, v_wr, v_pf, _ = virtual_metrics
-    title = f"SAATLIK RAPOR | {current_time.strftime('%H:00')}"
-    body = (
-        f"KASA   ${state.balance:.2f} (Tepe ${state.peak_balance:.2f}) | Pozisyon ${state.dynamic_trade_size:.1f}\n"
-        f"GERCEK {wins}/{tot_trd} | %{b_wr} | PF {pf} | DD %{max_dd:.2f}\n"
-        f"SANAL  {v_wins}/{v_tot} | %{v_wr} | PnL ${v_pnl_usd:.2f} | PF {v_pf}\n"
-        f"BTC    ATR {state.btc_atr_pct:.3f} | RSI {state.btc_rsi:.1f} | ADX {state.btc_adx:.1f}\n"
-        f"PIYASA {state.market_direction_text}\n"
-        f"ACIK   Gercek {len(state.active_positions)}/{CONFIG['MAX_POSITIONS']} | Sanal {len(state.paper_positions)}\n"
-        f"RED(1s) {state.hourly_missed_signals} | Scan {state.scan_id}"
-    )
-    return title, body
-
-def create_daily_backup_zip(filepaths: list, tarih_str: str) -> str:
-    """Gunluk dosyalari zipleyip BASE_PATH altina kaydeder."""
-    zip_name = f"daily_backup_{tarih_str}.zip"
-    zip_path = os.path.join(CONFIG["BASE_PATH"], zip_name)
-    with zipfile.ZipFile(zip_path, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
-        for fp in filepaths:
-            if not os.path.exists(fp):
-                continue
-            arcname = os.path.relpath(fp, CONFIG["BASE_PATH"]).replace("\\", "/")
-            zf.write(fp, arcname=arcname)
-    return zip_path
-
-def upload_backup_to_github(zip_path: str, tarih_str: str) -> tuple[bool, str]:
-    """
-    GitHub private repo backup (Contents API).
-    Donus: (success, info_msg)
-    """
-    if not CONFIG.get("GITHUB_BACKUP_ENABLED", False):
-        return False, "disabled"
-    repo = str(CONFIG.get("GITHUB_BACKUP_REPO", "")).strip()
-    token = str(CONFIG.get("GITHUB_BACKUP_TOKEN", "")).strip()
-    branch = str(CONFIG.get("GITHUB_BACKUP_BRANCH", "main")).strip() or "main"
-    folder = str(CONFIG.get("GITHUB_BACKUP_DIR", "daily-backups")).strip().strip("/")
-    if not repo or not token:
-        return False, "missing_repo_or_token"
-    try:
-        with open(zip_path, "rb") as f:
-            content_b64 = base64.b64encode(f.read()).decode("ascii")
-        remote_name = os.path.basename(zip_path)
-        remote_path = f"{folder}/{remote_name}" if folder else remote_name
-        url = f"https://api.github.com/repos/{repo}/contents/{remote_path}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "RBD-CRYPT-BACKUP"
-        }
-        payload = {
-            "message": f"backup: {tarih_str}",
-            "content": content_b64,
-            "branch": branch
-        }
-        r = requests.put(url, headers=headers, json=payload, timeout=60)
-        if r.status_code in (200, 201):
-            return True, f"{repo}/{remote_path}@{branch}"
-        return False, f"http_{r.status_code}"
-    except Exception as e:
-        log_error("upload_backup_to_github", e, os.path.basename(zip_path))
-        return False, type(e).__name__
 
 
 def gunluk_dump_gonder():
@@ -437,22 +317,9 @@ def gunluk_dump_gonder():
         except Exception as e:
             log_error("gunluk_dump_gonder", e, filepath)
 
-    backup_note = "GitHub backup: kapali"
-    try:
-        zip_path = create_daily_backup_zip(dosyalar, tarih_str)
-        zip_size_kb = round(os.path.getsize(zip_path) / 1024, 1) if os.path.exists(zip_path) else 0
-        ok, info = upload_backup_to_github(zip_path, tarih_str)
-        if ok:
-            backup_note = f"GitHub backup OK -> {info} ({zip_size_kb} KB)"
-        else:
-            backup_note = f"GitHub backup yok ({info}) | local zip: {os.path.basename(zip_path)} ({zip_size_kb} KB)"
-    except Exception as e:
-        log_error("daily_zip_backup", e, tarih_str)
-        backup_note = f"GitHub backup hata: {type(e).__name__}"
-
     send_ntfy_notification(
-        f"GUNLUK DOKUM TAMAMLANDI ({tarih_str})",
-        f"Tum {len(dosyalar)} dosya basariyla gonderildi.\n{backup_note}",
+        f"✅ Gunluk Dokum Tamamlandi ({tarih_str})",
+        f"Tum {len(dosyalar)} dosya başariyla gonderildi. Iyi geceler patron 🌙",
         tags="white_check_mark,moon", priority="3"
     )
 
@@ -509,21 +376,12 @@ def get_live_futures_data(symbol: str, limit=300):
 # ==============================================================
 # 7. INDIKAToRLER
 # ==============================================================
-def _talib_ready_array(series: pd.Series) -> np.ndarray:
-    arr = pd.to_numeric(series, errors='coerce').to_numpy(dtype=np.float64, copy=False)
-    return np.ascontiguousarray(arr, dtype=np.float64)
-
-def hesapla_indikatorler(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+def hesapla_indikatorler(df: pd.DataFrame) -> pd.DataFrame:
     # talib float64 zorunlu — Binance bazen object/float32 doner, cast şart
-    c = _talib_ready_array(df['close'])
-    h = _talib_ready_array(df['high'])
-    l = _talib_ready_array(df['low'])
-    v = _talib_ready_array(df['volume'])
-    if min(len(c), len(h), len(l), len(v)) < 50:
-        raise ValueError("insufficient bars after numeric conversion")
-    if (not np.isfinite(c[-50:]).all() or not np.isfinite(h[-50:]).all() or
-        not np.isfinite(l[-50:]).all() or not np.isfinite(v[-50:]).all()):
-        raise ValueError("non-finite values in recent OHLCV")
+    c = df['close'].values.astype(np.float64)
+    h = df['high'].values.astype(np.float64)
+    l = df['low'].values.astype(np.float64)
+    v = df['volume'].values.astype(np.float64)
 
     df['RSI']       = talib.RSI(c, CONFIG["RSI_PERIOD"])
     df['ADX']       = talib.ADX(h, l, c, 14)
@@ -578,32 +436,31 @@ def hesapla_indikatorler(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
 # ==============================================================
 # 8. SINYAL VE SKOR HESABI
 # ==============================================================
-def hesapla_power_score(row, thresholds: dict = None) -> float:
+def hesapla_power_score(row) -> float:
     """
     0-100 arasi sinyal gucu skoru.
     Walk-forward analizinde hangi skorlarin karli oldugunu gormek icin kullanilir.
     Alt bileşenler de loglaniyor.
     """
     score = 0.0
-    thresholds = thresholds or get_signal_thresholds("auto")
 
     # RSI bileşeni (0-25)
     if bool(row['FLIP_LONG']):
-        rsi_component = max(0, min(25, (float(row['RSI']) - thresholds["rsi_long"]) * 2.5))
+        rsi_component = max(0, min(25, (row['RSI'] - CONFIG["RSI_LONG"]) * 2.5))
     else:
-        rsi_component = max(0, min(25, (thresholds["rsi_short"] - float(row['RSI'])) * 2.5))
+        rsi_component = max(0, min(25, (CONFIG["RSI_SHORT"] - row['RSI']) * 2.5))
     score += rsi_component
 
     # Hacim bileşeni (0-25)
-    vol_component = max(0, min(25, (float(row['VOL_RATIO']) - thresholds["vol_filter"]) * 15))
+    vol_component = max(0, min(25, (row['VOL_RATIO'] - CONFIG["VOL_FILTER"]) * 15))
     score += vol_component
 
     # ADX bileşeni (0-20)
-    adx_component = max(0, min(20, (float(row['ADX']) - thresholds["adx_threshold"]) * 0.8))
+    adx_component = max(0, min(20, (row['ADX'] - CONFIG["ADX_THRESHOLD"]) * 0.8))
     score += adx_component
 
     # ATR % bileşeni (0-15) — duşuk ATR duşuk skor
-    atr_component = max(0, min(15, (float(row['ATR_PCT']) - thresholds["min_atr_pct"]) * 5))
+    atr_component = max(0, min(15, (row['ATR_PCT'] - CONFIG["MIN_ATR_PERCENT"]) * 5))
     score += atr_component
 
     # MACD histogram yonu (0-10)
@@ -619,14 +476,21 @@ def hesapla_power_score(row, thresholds: dict = None) -> float:
 
     return round(score, 2)
 
-def hesapla_signal_score(row, signal_type: str = None, thresholds: dict = None) -> int:
+def hesapla_signal_score(row) -> int:
     """
     Kac koşul saglandi (0-6). Basit sayim, gucu degil adeti verir.
     """
-    thresholds = thresholds or get_signal_thresholds("auto")
-    if signal_type is None:
-        signal_type = get_flip_candidate_signal(row)
-    return score_from_flags(evaluate_signal_filters(row, signal_type, thresholds))
+    flip_long  = bool(row['FLIP_LONG'])
+    flip_short = bool(row['FLIP_SHORT'])
+    checks = [
+        flip_long or flip_short,
+        row['RSI'] > CONFIG["RSI_LONG"] if flip_long else row['RSI'] < CONFIG["RSI_SHORT"],
+        row['VOL_RATIO'] > CONFIG["VOL_FILTER"],
+        row['ADX'] > CONFIG["ADX_THRESHOLD"],
+        row['ATR_PCT'] > CONFIG["MIN_ATR_PERCENT"],
+        (row['close'] > row['EMA20']) if flip_long else (row['close'] < row['EMA20'])
+    ]
+    return sum(checks)
 
 def get_flip_candidate_signal(row):
     """Aday sinyal: yalnizca FLIP'e gore LONG/SHORT doner."""
@@ -643,72 +507,41 @@ def get_flip_candidate_signal(row):
 
 def get_candidate_fail_reason(row, candidate_signal: str) -> str:
     """FLIP var ama teknik filtreler tam degilse ilk patlayan kosulu yazar."""
-    t = get_signal_thresholds("candidate")
     is_long = candidate_signal == "LONG"
     atr_pct = (float(row['ATR_14']) / max(float(row['close']), 1e-10)) * 100
-    if is_long and not (float(row['RSI']) > t["rsi_long"]):
+    if is_long and not (float(row['RSI']) > CONFIG["RSI_LONG"]):
         return "CAND_FAIL_RSI"
-    if (not is_long) and not (float(row['RSI']) < t["rsi_short"]):
+    if (not is_long) and not (float(row['RSI']) < CONFIG["RSI_SHORT"]):
         return "CAND_FAIL_RSI"
-    if not (float(row['VOL_RATIO']) > t["vol_filter"]):
+    if not (float(row['VOL_RATIO']) > CONFIG["VOL_FILTER"]):
         return "CAND_FAIL_VOL"
     if is_long and not (float(row['close']) > float(row['EMA20'])):
         return "CAND_FAIL_EMA"
     if (not is_long) and not (float(row['close']) < float(row['EMA20'])):
         return "CAND_FAIL_EMA"
-    if not (float(row['ADX']) > t["adx_threshold"]):
+    if not (float(row['ADX']) > CONFIG["ADX_THRESHOLD"]):
         return "CAND_FAIL_ADX"
-    if not (atr_pct >= t["min_atr_pct"]):
+    if not (atr_pct >= CONFIG["MIN_ATR_PERCENT"]):
         return "CAND_FAIL_ATR"
     return "CAND_FAIL_OTHER"
 
-def get_signal_thresholds(layer: str = "auto") -> dict:
-    if layer == "candidate":
-        return {
-            "rsi_long": float(CONFIG["CANDIDATE_RSI_LONG"]),
-            "rsi_short": float(CONFIG["CANDIDATE_RSI_SHORT"]),
-            "vol_filter": float(CONFIG["CANDIDATE_VOL_FILTER"]),
-            "adx_threshold": float(CONFIG["CANDIDATE_ADX_THRESHOLD"]),
-            "min_atr_pct": float(CONFIG["CANDIDATE_MIN_ATR_PERCENT"]),
-            "min_power_score": float(CONFIG["CANDIDATE_MIN_POWER_SCORE"]),
-        }
-    return {
-        "rsi_long": float(CONFIG["AUTO_ENTRY_RSI_LONG"]),
-        "rsi_short": float(CONFIG["AUTO_ENTRY_RSI_SHORT"]),
-        "vol_filter": float(CONFIG["AUTO_ENTRY_VOL_FILTER"]),
-        "adx_threshold": float(CONFIG["AUTO_ENTRY_ADX_THRESHOLD"]),
-        "min_atr_pct": float(CONFIG["AUTO_ENTRY_MIN_ATR_PERCENT"]),
-        "min_power_score": float(CONFIG["AUTO_ENTRY_MIN_POWER_SCORE"]),
-    }
-
-def evaluate_signal_filters(row, signal_type: str, thresholds: dict) -> dict:
-    if signal_type not in ("LONG", "SHORT"):
-        return {
-            "flip_ok": False, "rsi_ok": False, "vol_ok": False, "adx_ok": False,
-            "atr_ok": False, "ema_ok": False, "all_ok": False
-        }
-    is_long = signal_type == "LONG"
-    flip_ok = bool(row['FLIP_LONG']) if is_long else bool(row['FLIP_SHORT'])
-    rsi_ok = float(row['RSI']) > thresholds["rsi_long"] if is_long else float(row['RSI']) < thresholds["rsi_short"]
-    vol_ok = float(row['VOL_RATIO']) > thresholds["vol_filter"]
-    adx_ok = float(row['ADX']) > thresholds["adx_threshold"]
-    atr_ok = (float(row['ATR_14']) / max(float(row['close']), 1e-10) * 100) >= thresholds["min_atr_pct"]
-    ema_ok = float(row['close']) > float(row['EMA20']) if is_long else float(row['close']) < float(row['EMA20'])
-    all_ok = all([flip_ok, rsi_ok, vol_ok, adx_ok, atr_ok, ema_ok])
-    return {
-        "flip_ok": flip_ok, "rsi_ok": bool(rsi_ok), "vol_ok": bool(vol_ok),
-        "adx_ok": bool(adx_ok), "atr_ok": bool(atr_ok), "ema_ok": bool(ema_ok),
-        "all_ok": bool(all_ok)
-    }
-
-def score_from_flags(flags: dict) -> int:
-    return int(sum(1 for k in ["flip_ok", "rsi_ok", "vol_ok", "adx_ok", "atr_ok", "ema_ok"] if flags.get(k)))
-
 def sinyal_kontrol(row):
-    auto_t = get_signal_thresholds("auto")
-    for sig in ("LONG", "SHORT"):
-        if evaluate_signal_filters(row, sig, auto_t)["all_ok"]:
-            return sig
+    # pandas Series'te bool degerleri .get() degil bool() ile alinmali
+    flip_long  = bool(row['FLIP_LONG'])
+    flip_short = bool(row['FLIP_SHORT'])
+    atr_ok     = bool((row['ATR_14'] / row['close'] * 100) >= CONFIG["MIN_ATR_PERCENT"])
+    is_long  = (flip_long  and row['RSI'] > CONFIG["RSI_LONG"]
+                and row['VOL_RATIO'] > CONFIG["VOL_FILTER"]
+                and row['close'] > row['EMA20']
+                and row['ADX']   > CONFIG["ADX_THRESHOLD"]
+                and atr_ok)
+    is_short = (flip_short and row['RSI'] < CONFIG["RSI_SHORT"]
+                and row['VOL_RATIO'] > CONFIG["VOL_FILTER"]
+                and row['close'] < row['EMA20']
+                and row['ADX']   > CONFIG["ADX_THRESHOLD"]
+                and atr_ok)
+    if is_long:  return "LONG"
+    if is_short: return "SHORT"
     return None
 
 # ==============================================================
@@ -724,7 +557,7 @@ def get_btc_context() -> dict:
             "ema20": 0.0, "bb_width_pct": 0.0
         }
     try:
-        btc_df = hesapla_indikatorler(btc_df, "BTCUSDT")
+        btc_df = hesapla_indikatorler(btc_df)
         r = btc_df.iloc[-2]
         bb_width = (r['BBANDS_UP'] - r['BBANDS_LOW']) / r['BBANDS_MID'] * 100 if r['BBANDS_MID'] > 0 else 0
         return {
@@ -739,11 +572,7 @@ def get_btc_context() -> dict:
             "bb_width_pct":round(float(bb_width), 3)
         }
     except Exception as e:
-        try:
-            dtypes_str = ",".join(f"{c}:{btc_df[c].dtype}" for c in ['open','high','low','close','volume'] if c in btc_df.columns)
-        except Exception:
-            dtypes_str = "dtype_unavailable"
-        log_error("get_btc_context", e, dtypes_str)
+        log_error("get_btc_context", e)
         return {
             "trend": 0, "atr_pct": 0.0, "rsi": 0.0, "adx": 0.0,
             "vol_ratio": 0.0, "macd_hist": 0.0, "close": 0.0,
@@ -766,9 +595,7 @@ def log_trade_to_csv(trade_dict: dict):
 
 def log_potential_signal(sym: str, signal_type: str, row, score: int,
                           power_score: float, entered: bool, reason: str = "",
-                          btc_ctx: dict = None, candidate_signal: str = None,
-                          candidate_flags: dict = None, auto_flags: dict = None,
-                          decision_meta: dict = None):
+                          btc_ctx: dict = None):
     """
     all_signals.csv — Her tespit edilen sinyalin tam fotografi.
     Girişe donuşsun ya da donuşmesin, tum koşullar kaydediliyor.
@@ -777,9 +604,6 @@ def log_potential_signal(sym: str, signal_type: str, row, score: int,
     """
     if btc_ctx is None:
         btc_ctx = {}
-    candidate_flags = candidate_flags or {}
-    auto_flags = auto_flags or {}
-    decision_meta = decision_meta or {}
 
     try:
         bb_width = (float(row['BBANDS_UP']) - float(row['BBANDS_LOW'])) / max(float(row['BBANDS_MID']), 1e-10) * 100
@@ -789,8 +613,6 @@ def log_potential_signal(sym: str, signal_type: str, row, score: int,
             'scan_id':          state.scan_id,
             'coin':             sym,
             'signal':           signal_type,
-            'is_candidate':     bool(candidate_signal),
-            'candidate_signal': candidate_signal or "",
             # Sinyal kalitesi
             'score':            score,
             'power_score':      power_score,
@@ -835,42 +657,15 @@ def log_potential_signal(sym: str, signal_type: str, row, score: int,
             'is_chop_market':   state.is_chop_market,
             'active_positions': len(state.active_positions),
             'balance_at_signal':round(state.balance, 2),
-            # Aday ve auto-entry filtre flaglari
-            'flip_long':        bool(row.get('FLIP_LONG', False)),
-            'flip_short':       bool(row.get('FLIP_SHORT', False)),
-            'rsi_ok':           bool(candidate_flags.get('rsi_ok', False)),
-            'vol_ok':           bool(candidate_flags.get('vol_ok', False)),
-            'adx_ok':           bool(candidate_flags.get('adx_ok', False)),
-            'atr_ok':           bool(candidate_flags.get('atr_ok', False)),
-            'ema_ok':           bool(candidate_flags.get('ema_ok', False)),
-            'power_ok':         bool(decision_meta.get('power_ok', False)),
-            'btc_trend_ok':     bool(decision_meta.get('btc_trend_ok', False)),
-            'chop_ok':          bool(decision_meta.get('chop_ok', True)),
-            'cooldown_ok':      bool(decision_meta.get('cooldown_ok', True)),
-            'capacity_ok':      bool(decision_meta.get('capacity_ok', True)),
-            'already_in':       bool(decision_meta.get('already_in', False)),
-            'auto_entry_eligible': bool(decision_meta.get('auto_entry_eligible', False)),
-            'rejection_stage':  str(decision_meta.get('rejection_stage', "")),
-            'rejection_reason': str(decision_meta.get('rejection_reason', reason)),
-            'auto_rsi_ok':      bool(auto_flags.get('rsi_ok', False)),
-            'auto_vol_ok':      bool(auto_flags.get('vol_ok', False)),
-            'auto_adx_ok':      bool(auto_flags.get('adx_ok', False)),
-            'auto_atr_ok':      bool(auto_flags.get('atr_ok', False)),
-            'auto_ema_ok':      bool(auto_flags.get('ema_ok', False)),
             # Karar
             'tradable':         entered,
             'blocked_reason':   reason,
             # Filtre eşikleri (parametre degişirse retroaktif analiz icin)
-            'cfg_rsi_long':     CONFIG["AUTO_ENTRY_RSI_LONG"],
-            'cfg_rsi_short':    CONFIG["AUTO_ENTRY_RSI_SHORT"],
-            'cfg_vol_filter':   CONFIG["AUTO_ENTRY_VOL_FILTER"],
-            'cfg_adx_thr':      CONFIG["AUTO_ENTRY_ADX_THRESHOLD"],
-            'cfg_atr_min_pct':  CONFIG["AUTO_ENTRY_MIN_ATR_PERCENT"],
-            'cfg_cand_rsi_long':CONFIG["CANDIDATE_RSI_LONG"],
-            'cfg_cand_rsi_short':CONFIG["CANDIDATE_RSI_SHORT"],
-            'cfg_cand_vol_filter':CONFIG["CANDIDATE_VOL_FILTER"],
-            'cfg_cand_adx_thr': CONFIG["CANDIDATE_ADX_THRESHOLD"],
-            'cfg_cand_atr_min_pct': CONFIG["CANDIDATE_MIN_ATR_PERCENT"],
+            'cfg_rsi_long':     CONFIG["RSI_LONG"],
+            'cfg_rsi_short':    CONFIG["RSI_SHORT"],
+            'cfg_vol_filter':   CONFIG["VOL_FILTER"],
+            'cfg_adx_thr':      CONFIG["ADX_THRESHOLD"],
+            'cfg_atr_min_pct':  CONFIG["MIN_ATR_PERCENT"],
             'cfg_st_m':         CONFIG["ST_M"],
         }
         pd.DataFrame([log_row]).to_csv(
@@ -912,24 +707,11 @@ def log_market_context(btc_ctx: dict, coin_count: int, open_pos: int):
     except Exception as e:
         log_error("log_market_context", e)
 
-def get_advanced_metrics(trade_mode: str = "REAL"):
+def get_advanced_metrics():
     try:
         if not os.path.exists(FILES["LOG"]):
             return 0, 0, 0, 0.0, 0.0
         df = pd.read_csv(FILES["LOG"])
-        if len(df) == 0:
-            return 0, 0, 0, 0.0, 0.0
-        if 'Trade_Mode' in df.columns:
-            if trade_mode:
-                tm = df['Trade_Mode'].astype(str).str.upper()
-                if str(trade_mode).upper() == "REAL":
-                    df = df[(tm == "REAL") | tm.isin(["", "NAN", "NONE"])].copy()
-                else:
-                    df = df[tm == str(trade_mode).upper()].copy()
-        else:
-            # Eski loglar varsayılan olarak GERÇEK kabul edilir
-            if str(trade_mode).upper() == "VIRTUAL":
-                return 0, 0, 0, 0.0, 0.0
         if len(df) == 0:
             return 0, 0, 0, 0.0, 0.0
         wins   = df[df['PnL_Yuzde'] > 0]
@@ -938,7 +720,7 @@ def get_advanced_metrics(trade_mode: str = "REAL"):
         gross_profit = wins['PnL_USD'].sum()   if 'PnL_USD' in wins.columns   else wins['PnL_Yuzde'].sum()
         gross_loss   = abs(losses['PnL_USD'].sum()) if 'PnL_USD' in losses.columns else abs(losses['PnL_Yuzde'].sum())
         pf  = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 99.9
-        mdd = calc_real_mdd_from_trade_log(df) if str(trade_mode).upper() == "REAL" else 0.0
+        mdd = calc_real_mdd_from_trade_log(df)
         return tot_trd, w_count, int((w_count / tot_trd) * 100) if tot_trd > 0 else 0, pf, mdd
     except Exception as e:
         log_error("get_advanced_metrics", e)
@@ -1017,180 +799,6 @@ def create_trade_chart(df, sym, pos, is_entry=False, curr_c=None, pnl=0.0, close
         plt.close('all')
         return None
 
-def maybe_open_paper_position(sym: str, df: pd.DataFrame, row_closed, signal: str,
-                              power_score: float, signal_score: int, reason: str = ""):
-    """Aday shortlist için sanal işlem açar (aynı sembolde bir tane aktif)."""
-    try:
-        if not signal:
-            return
-        if sym in state.paper_positions:
-            return
-        entry_p = float(row_closed['close'])
-        atr_val = float(row_closed['ATR_14'])
-        sl_p = entry_p - (CONFIG["SL_M"] * atr_val) if signal == "LONG" else entry_p + (CONFIG["SL_M"] * atr_val)
-        tp_p = entry_p + (CONFIG["TP_M"] * atr_val) if signal == "LONG" else entry_p - (CONFIG["TP_M"] * atr_val)
-        v_size = state.dynamic_trade_size
-
-        state.paper_positions[sym] = {
-            'dir': signal,
-            'entry_p': entry_p,
-            'sl': sl_p,
-            'tp': tp_p,
-            'full_time': get_tr_time().strftime('%Y-%m-%d %H:%M:%S'),
-            'entry_idx_time': str(row_closed.name),
-            'curr_pnl': 0.0,
-            'best_pnl': 0.0,
-            'curr_p': float(df['close'].iloc[-1]),
-            'trade_size': v_size,
-            'entry_rsi': round(float(row_closed['RSI']), 2),
-            'entry_adx': round(float(row_closed['ADX']), 2),
-            'entry_vol_ratio': round(float(row_closed['VOL_RATIO']), 3),
-            'entry_atr_pct': round(float(row_closed['ATR_PCT']), 4),
-            'power_score': float(power_score),
-            'signal_score': int(signal_score),
-            'candidate_reason': reason or "SHORTLIST",
-        }
-        state.save_state()
-
-        try:
-            chart_buf = create_trade_chart(df, sym, state.paper_positions[sym], is_entry=True)
-            send_ntfy_notification(
-                f"SANAL ISLEM ACILDI: {sym}",
-                f"Yon: {signal} | Fiyat: {entry_p:.5f}\n"
-                f"SL: {sl_p:.5f} | TP: {tp_p:.5f}\n"
-                f"Pozisyon(sim): ${v_size:.2f} | Power: {power_score:.1f} | Score: {signal_score}/6\n"
-                f"Neden: {reason or 'SHORTLIST'}",
-                image_buf=chart_buf, tags="mag,chart_with_upwards_trend", priority="3"
-            )
-        except Exception as e:
-            log_error("paper_entry_notification", e, sym)
-    except Exception as e:
-        log_error("maybe_open_paper_position", e, sym)
-
-def update_paper_position_for_symbol(sym: str, df: pd.DataFrame, btc_ctx: dict):
-    """Sanal işlemi TP/SL/stale kurallarıyla yönetir, kapanırsa log+ntfy gönderir."""
-    if sym not in state.paper_positions:
-        return
-    try:
-        pos = state.paper_positions[sym]
-        curr_h = float(df['high'].iloc[-1])
-        curr_l = float(df['low'].iloc[-1])
-        curr_c = float(df['close'].iloc[-1])
-        entry_p = float(pos.get('entry_p', curr_c))
-
-        pos['curr_p'] = curr_c
-        closed = False
-        close_reason = ""
-        pnl = 0.0
-
-        pos_time = datetime.strptime(pos['full_time'], '%Y-%m-%d %H:%M:%S')
-        hold_minutes = (get_tr_time() - pos_time).total_seconds() / 60
-
-        curr_pnl_live = ((curr_c - entry_p) / entry_p * 100 if pos['dir'] == 'LONG'
-                         else (entry_p - curr_c) / entry_p * 100)
-        pos['curr_pnl'] = curr_pnl_live
-        pos['best_pnl'] = max(float(pos.get('best_pnl', curr_pnl_live)), curr_pnl_live)
-
-        if pos['dir'] == 'LONG':
-            if curr_h >= pos['tp']:
-                pnl = (pos['tp'] - entry_p) / entry_p * 100
-                closed, close_reason = True, "KAR ALDI"
-            elif curr_l <= pos['sl']:
-                pnl = (pos['sl'] - entry_p) / entry_p * 100
-                closed, close_reason = True, "STOP OLDU"
-        else:
-            if curr_l <= pos['tp']:
-                pnl = (entry_p - pos['tp']) / entry_p * 100
-                closed, close_reason = True, "KAR ALDI"
-            elif curr_h >= pos['sl']:
-                pnl = (entry_p - pos['sl']) / entry_p * 100
-                closed, close_reason = True, "STOP OLDU"
-
-        if (not closed) and hold_minutes > CONFIG["MAX_HOLD_MINUTES"]:
-            last_trend = int(df['TREND'].iloc[-1])
-            grace_limit = CONFIG["MAX_HOLD_MINUTES"] + CONFIG["MAX_HOLD_ST_GRACE_BARS"] * 5
-            adverse_flip = ((pos['dir'] == 'LONG' and last_trend == -1) or
-                            (pos['dir'] == 'SHORT' and last_trend == 1))
-            if curr_pnl_live > 0:
-                if pos['dir'] == 'LONG':
-                    pos['sl'] = max(float(pos['sl']), float(entry_p))
-                else:
-                    pos['sl'] = min(float(pos['sl']), float(entry_p))
-            if adverse_flip:
-                closed, close_reason, pnl = True, "TREND_FLIP_EXIT", curr_pnl_live
-            elif hold_minutes > grace_limit:
-                best_pnl = float(pos.get('best_pnl', curr_pnl_live))
-                ema20_now = float(df['EMA20'].iloc[-1])
-                ema_against = ((pos['dir'] == 'LONG' and curr_c < ema20_now) or
-                               (pos['dir'] == 'SHORT' and curr_c > ema20_now))
-                no_progress = (curr_pnl_live <= float(CONFIG["STALE_EXIT_MIN_PNL_PCT"]) and
-                               best_pnl < float(CONFIG["STALE_EXIT_MIN_BEST_PNL_PCT"]))
-                if no_progress or ema_against:
-                    closed, close_reason, pnl = True, "STALE_EXIT", curr_pnl_live
-
-        if not closed:
-            return
-
-        trade_size = float(pos.get('trade_size', state.dynamic_trade_size))
-        pnl_usd = trade_size * (pnl / 100)
-        row_at_close = df.iloc[-2]
-        trade_log = {
-            'Trade_Mode':         'VIRTUAL',
-            'Scan_ID':            state.scan_id,
-            'Restarted':          pos.get('restarted', False),
-            'Tarih':              get_tr_time().strftime('%Y-%m-%d'),
-            'Giris_Saati':        pos['full_time'].split(' ')[1],
-            'Cikis_Saati':        get_tr_time().strftime('%H:%M:%S'),
-            'Hold_Dakika':        round(hold_minutes, 1),
-            'Coin':               sym,
-            'Yon':                pos['dir'],
-            'Giris_Fiyati':       round(entry_p, 6),
-            'Cikis_Fiyati':       round(curr_c, 6),
-            'TP_Seviyesi':        round(pos['tp'], 6),
-            'SL_Seviyesi':        round(pos['sl'], 6),
-            'TP_SL_Orani':        round(abs(pos['tp'] - entry_p) / max(abs(pos['sl'] - entry_p), 1e-12), 3),
-            'Risk_USD':           round(trade_size, 2),
-            'PnL_Yuzde':          round(pnl, 2),
-            'PnL_USD':            round(pnl_usd, 2),
-            'Kasa_Son_Durum':     round(state.balance, 2),  # sanal işlem bakiyeyi değiştirmez
-            'Sonuc':              close_reason,
-            'Giris_RSI':          pos.get('entry_rsi', 0),
-            'Giris_ADX':          pos.get('entry_adx', 0),
-            'Giris_VOL_RATIO':    pos.get('entry_vol_ratio', 0),
-            'Giris_ATR_PCT':      pos.get('entry_atr_pct', 0),
-            'Giris_Power_Score':  pos.get('power_score', 0),
-            'Giris_Score':        pos.get('signal_score', 0),
-            'Cikis_RSI':          round(float(row_at_close['RSI']), 2),
-            'Cikis_ADX':          round(float(row_at_close['ADX']), 2),
-            'Cikis_VOL_RATIO':    round(float(row_at_close['VOL_RATIO']), 3),
-            'Cikis_ATR_PCT':      round(float(row_at_close['ATR_PCT']), 4),
-            'Cikis_TREND':        int(row_at_close['TREND']),
-            'Cikis_MACD_HIST':    round(float(row_at_close.get('MACD_HIST', 0)), 6),
-            'BTC_Trend':          btc_ctx.get('trend', 0),
-            'BTC_ATR_PCT':        btc_ctx.get('atr_pct', 0.0),
-            'BTC_RSI':            btc_ctx.get('rsi', 0.0),
-            'BTC_ADX':            btc_ctx.get('adx', 0.0),
-            'BTC_Vol_Ratio':      btc_ctx.get('vol_ratio', 0.0),
-        }
-        log_trade_to_csv(trade_log)
-
-        try:
-            chart_buf = create_trade_chart(df, sym, pos, is_entry=False, curr_c=curr_c, pnl=pnl, close_reason=close_reason)
-            send_ntfy_notification(
-                f"SANAL ISLEM KAPANDI: {sym}",
-                f"Sonuc: {close_reason}\nPnL: %{pnl:.2f} | Sim PnL: ${pnl_usd:.2f}\n"
-                f"Sure: {round(hold_minutes,1)} dk | Yon: {pos['dir']}\n"
-                f"Giris: {entry_p:.5f} | Cikis: {curr_c:.5f}",
-                image_buf=chart_buf, tags="clipboard,chart_with_upwards_trend", priority="3"
-            )
-        except Exception as e:
-            log_error("paper_close_notification", e, sym)
-
-        del state.paper_positions[sym]
-        state.save_state()
-    except Exception as e:
-        log_error("update_paper_position_for_symbol", e, sym)
-
 # ==============================================================
 # 12. DASHBOARD
 # ==============================================================
@@ -1198,48 +806,6 @@ def log_print(msg: str):
     """Zaman damgali duz print — Railway loglarinda okunmasi kolay."""
     zaman = get_tr_time().strftime('%H:%M:%S')
     print(f"[{zaman}] {msg}", flush=True)
-
-_shutdown_flag = {"done": False}
-
-def log_storage_diagnostics():
-    """Startup'ta persistence path ve state dosyalarini raporla."""
-    try:
-        log_print(f"STORAGE PATH: {CONFIG['BASE_PATH']}")
-        for key in ["ACTIVE", "STATE"]:
-            p = FILES[key]
-            exists = os.path.exists(p)
-            size = os.path.getsize(p) if exists else 0
-            log_print(f"  {key}: {'OK' if exists else 'MISSING'} | {p} | {size} bytes")
-        log_print(f"  Recovered active positions: {len(getattr(state, 'active_positions', {}))}")
-        log_print(f"  Recovered paper positions: {len(getattr(state, 'paper_positions', {}))}")
-    except Exception as e:
-        log_error("log_storage_diagnostics", e)
-
-def flush_state_on_shutdown(reason: str = "shutdown"):
-    if _shutdown_flag["done"]:
-        return
-    _shutdown_flag["done"] = True
-    try:
-        if CONFIG.get("ENABLE_SHUTDOWN_FLUSH", True):
-            state.save_state()
-            log_print(f"STATE FLUSH OK ({reason})")
-    except Exception as e:
-        log_error("flush_state_on_shutdown", e, reason)
-
-def _handle_termination(signum, frame):
-    try:
-        log_print(f"TERM SIGNAL ALINDI: {signum}")
-        flush_state_on_shutdown(f"signal_{signum}")
-        try:
-            send_ntfy_notification(
-                "BOT SHUTDOWN",
-                f"Signal: {signum}\nScan ID: {state.scan_id}\nAcik pozisyon: {len(state.active_positions)}",
-                tags="warning", priority="3"
-            )
-        except Exception as e:
-            log_error("shutdown_ntfy", e, str(signum))
-    finally:
-        raise SystemExit(0)
 
 
 def draw_fund_dashboard():
@@ -1367,8 +933,7 @@ def run_bot_cycle():
 
     state.status = "🌐 BINANCE FUTURES: Hacimli Coinler cekiliyor..."
     draw_fund_dashboard()
-    scan_limit = int(max(CONFIG["TOP_COINS_LIMIT"], CONFIG.get("CANDIDATE_TOP_COINS_LIMIT", CONFIG["TOP_COINS_LIMIT"])))
-    coins = get_top_futures_coins(scan_limit)
+    coins = get_top_futures_coins(CONFIG["TOP_COINS_LIMIT"])
 
     # --- BTC Context ---
     btc_ctx = get_btc_context()
@@ -1419,14 +984,9 @@ def run_bot_cycle():
                 continue
 
             try:
-                df = hesapla_indikatorler(df, sym)
+                df = hesapla_indikatorler(df)
             except Exception as e:
-                try:
-                    dtypes_str = ",".join(f"{c}:{df[c].dtype}" for c in ['open','high','low','close','volume'] if c in df.columns)
-                    extra = f"{sym} | {dtypes_str}"
-                except Exception:
-                    extra = sym
-                log_error("hesapla_indikatorler", e, extra)
+                log_error("hesapla_indikatorler", e, sym)
                 continue
 
             # ── A. AKTIF ISLEM KONTROLu ──────────────────────────────
@@ -1505,7 +1065,6 @@ def run_bot_cycle():
                     row_at_close = df.iloc[-2]
                     trade_log = {
                         # Kimlik
-                        'Trade_Mode':         'REAL',
                         'Scan_ID':           state.scan_id,
                         'Restarted':         pos.get('restarted', False),
                         'Tarih':             get_tr_time().strftime('%Y-%m-%d'),
@@ -1562,7 +1121,7 @@ def run_bot_cycle():
                                                         curr_c=curr_c, pnl=pnl, close_reason=close_reason)
                         tag_emoji = "green_circle,moneybag" if pnl > 0 else "red_circle,x"
                         send_ntfy_notification(
-                            f"GERCEK ISLEM KAPANDI: {sym}",
+                            f"🔴 ISLEM KAPANDI: {sym}",
                             f"Sonuc: {close_reason}\nPnL: %{pnl:.2f} | Kâr/Zarar: ${pnl_usd:.2f}\n"
                             f"Sure: {round(hold_minutes,1)} dk | Yeni Kasa: ${state.balance:.2f}",
                             image_buf=chart_buf, tags=tag_emoji, priority="4"
@@ -1574,123 +1133,39 @@ def run_bot_cycle():
                     state.save_state()
                     continue  # Ayni scan'de re-entry engeli
 
-            if sym in state.paper_positions:
-                update_paper_position_for_symbol(sym, df, btc_ctx)
-
             # ── B. YENI SINYAL ────────────────────────────────────────
             row_closed = df.iloc[-2]
 
             candidate_signal = get_flip_candidate_signal(row_closed)
-            signal = None
+            signal = sinyal_kontrol(row_closed)
             entered, reason = False, ""
 
             if candidate_signal:
-                cand_t = get_signal_thresholds("candidate")
-                auto_t = get_signal_thresholds("auto")
-                candidate_flags = evaluate_signal_filters(row_closed, candidate_signal, cand_t)
-                auto_flags = evaluate_signal_filters(row_closed, candidate_signal, auto_t)
-                power_score = float(hesapla_power_score(row_closed, cand_t))
-                auto_power_score = float(hesapla_power_score(row_closed, auto_t))
-                signal_score = int(hesapla_signal_score(row_closed, candidate_signal, cand_t))
-                auto_signal_score = int(hesapla_signal_score(row_closed, candidate_signal, auto_t))
-                log_signal_type = candidate_signal
-                shortlist_eligible = False
-                decision_meta = {
-                    'power_ok': power_score >= cand_t["min_power_score"],
-                    'btc_trend_ok': True,
-                    'chop_ok': True,
-                    'cooldown_ok': True,
-                    'capacity_ok': True,
-                    'already_in': False,
-                    'auto_entry_eligible': False,
-                    'rejection_stage': '',
-                    'rejection_reason': ''
-                }
+                power_score  = float(hesapla_power_score(row_closed))
+                signal_score = int(hesapla_signal_score(row_closed))
+                log_signal_type = signal if signal else candidate_signal
 
-                if not candidate_flags["all_ok"]:
+                if signal is None:
                     reason = get_candidate_fail_reason(row_closed, candidate_signal)
-                    decision_meta['rejection_stage'] = "candidate_filter"
-                    decision_meta['rejection_reason'] = reason
-                elif power_score < cand_t["min_power_score"]:
-                    reason = f"CAND_LOW_POWER_{power_score:.0f}"
-                    decision_meta['power_ok'] = False
-                    decision_meta['rejection_stage'] = "candidate_filter"
-                    decision_meta['rejection_reason'] = reason
+                elif power_score < CONFIG["MIN_POWER_SCORE"]:
+                    reason = f"LOW_POWER_{power_score:.0f}"
+                elif btc_ctx["trend"] == 0:
+                    reason = "BTC_VERI_YOK"  # BTC verisi gelmedi, trading durduruldu
+                elif signal == "LONG" and btc_ctx["trend"] != 1:
+                    reason = "BTC_TREND_KOTU"
+                elif signal == "SHORT" and btc_ctx["trend"] != -1:
+                    reason = "BTC_TREND_KOTU"
+                elif sym in state.active_positions:
+                    reason = "ALREADY_IN"
+                elif (sym in state.cooldowns and
+                      (get_tr_time() - state.cooldowns[sym]).total_seconds() / 60 < CONFIG["COOLDOWN_MINUTES"]):
+                    cd_left = CONFIG["COOLDOWN_MINUTES"] - (get_tr_time() - state.cooldowns[sym]).total_seconds() / 60
+                    reason  = f"COOLDOWN_{round(cd_left,1)}dk"
+                elif len(state.active_positions) >= CONFIG["MAX_POSITIONS"]:
+                    reason = "MAX_POS"
+                elif row_closed['ADX'] < CONFIG["CHOP_ADX_THRESHOLD"]:
+                    reason = "LOW_ADX"
                 else:
-                    shortlist_eligible = True
-                    signal = candidate_signal if auto_flags["all_ok"] else None
-                    log_signal_type = signal if signal else candidate_signal
-                    if signal is None:
-                        reason = "AUTO_TECH_FAIL"
-                        decision_meta['rejection_stage'] = "auto_filter"
-                        decision_meta['rejection_reason'] = reason
-                    else:
-                        effective_auto_power = auto_power_score
-                        btc_trend_match = False
-                        if btc_ctx["trend"] != 0:
-                            btc_trend_match = ((signal == "LONG" and btc_ctx["trend"] == 1) or
-                                               (signal == "SHORT" and btc_ctx["trend"] == -1))
-                        decision_meta['btc_trend_ok'] = bool(btc_trend_match)
-
-                        if CONFIG.get("AUTO_BTC_TREND_MODE", "hard_block") == "soft_penalty":
-                            if not btc_trend_match:
-                                effective_auto_power -= float(CONFIG.get("AUTO_BTC_TREND_PENALTY", 0.0))
-                        else:
-                            if btc_ctx["trend"] == 0:
-                                reason = "BTC_VERI_YOK"
-                            elif not btc_trend_match:
-                                reason = "BTC_TREND_KOTU"
-                            if reason:
-                                decision_meta['rejection_stage'] = "market_filter"
-                                decision_meta['rejection_reason'] = reason
-
-                        if not reason and state.is_chop_market:
-                            chop_policy = str(CONFIG.get("AUTO_CHOP_POLICY", "block")).lower()
-                            if chop_policy == "block":
-                                decision_meta['chop_ok'] = False
-                                reason = "CHOP_MARKET"
-                                decision_meta['rejection_stage'] = "market_filter"
-                                decision_meta['rejection_reason'] = reason
-                            elif chop_policy == "penalty":
-                                effective_auto_power -= float(CONFIG.get("AUTO_CHOP_PENALTY", 0.0))
-
-                        if not reason and effective_auto_power < auto_t["min_power_score"]:
-                            reason = f"LOW_POWER_{effective_auto_power:.0f}"
-                            decision_meta['power_ok'] = False
-                            decision_meta['rejection_stage'] = "auto_filter"
-                            decision_meta['rejection_reason'] = reason
-
-                        if not reason and sym in state.active_positions:
-                            reason = "ALREADY_IN"
-                            decision_meta['already_in'] = True
-                            decision_meta['rejection_stage'] = "execution_filter"
-                            decision_meta['rejection_reason'] = reason
-
-                        if (not reason and sym in state.cooldowns and
-                              (get_tr_time() - state.cooldowns[sym]).total_seconds() / 60 < CONFIG["COOLDOWN_MINUTES"]):
-                            cd_left = CONFIG["COOLDOWN_MINUTES"] - (get_tr_time() - state.cooldowns[sym]).total_seconds() / 60
-                            reason  = f"COOLDOWN_{round(cd_left,1)}dk"
-                            decision_meta['cooldown_ok'] = False
-                            decision_meta['rejection_stage'] = "execution_filter"
-                            decision_meta['rejection_reason'] = reason
-
-                        if not reason and len(state.active_positions) >= CONFIG["MAX_POSITIONS"]:
-                            reason = "MAX_POS"
-                            decision_meta['capacity_ok'] = False
-                            decision_meta['rejection_stage'] = "execution_filter"
-                            decision_meta['rejection_reason'] = reason
-
-                        if not reason and float(row_closed['ADX']) < float(CONFIG["CHOP_ADX_THRESHOLD"]):
-                            reason = "LOW_ADX"
-                            decision_meta['rejection_stage'] = "execution_filter"
-                            decision_meta['rejection_reason'] = reason
-
-                        if not reason:
-                            decision_meta['auto_entry_eligible'] = True
-                            power_score = effective_auto_power
-                            signal_score = auto_signal_score
-
-                if decision_meta.get('auto_entry_eligible', False):
                     entry_p  = float(row_closed['close'])
                     atr_val  = float(row_closed['ATR_14'])
                     sl_p     = entry_p - (CONFIG["SL_M"] * atr_val) if signal == "LONG" else entry_p + (CONFIG["SL_M"] * atr_val)
@@ -1722,7 +1197,7 @@ def run_bot_cycle():
                     try:
                         chart_buf = create_trade_chart(df, sym, state.active_positions[sym], is_entry=True)
                         send_ntfy_notification(
-                            f"GERCEK ISLEM ACILDI: {sym}",
+                            f"🟢 YENI ISLEM: {sym}",
                             f"Yon: {signal} | Fiyat: {entry_p:.5f}\n"
                             f"SL: {sl_p:.5f} | TP: {tp_p:.5f}\n"
                             f"Pozisyon: ${t_size:.2f} | Power: {power_score} | Score: {signal_score}/6",
@@ -1730,14 +1205,6 @@ def run_bot_cycle():
                         )
                     except Exception as e:
                         log_error("entry_notification", e, sym)
-
-                if shortlist_eligible:
-                    maybe_open_paper_position(
-                        sym=sym, df=df, row_closed=row_closed, signal=candidate_signal,
-                        power_score=float(hesapla_power_score(row_closed, cand_t)),
-                        signal_score=int(hesapla_signal_score(row_closed, candidate_signal, cand_t)),
-                        reason=reason if reason else "SHORTLIST_OK"
-                    )
 
                 if signal and not entered:
                     state.missed_this_scan      += 1
@@ -1762,11 +1229,7 @@ def run_bot_cycle():
                 # Adaylar (flip) dahil tum sinyalleri logla
                 log_potential_signal(sym, log_signal_type, row_closed,
                                      signal_score, power_score,
-                                     entered, reason, btc_ctx,
-                                     candidate_signal=candidate_signal,
-                                     candidate_flags=candidate_flags,
-                                     auto_flags=auto_flags,
-                                     decision_meta=decision_meta)
+                                     entered, reason, btc_ctx)
 
         except Exception as e:
             log_error("coin_loop", e, sym)
@@ -1787,29 +1250,20 @@ def run_bot_cycle():
         state.last_heartbeat_hour = current_hour
         
         # Dashboard'daki performans metriklerini cekiyoruz
-        tot_trd, wins, b_wr, pf, max_dd = get_advanced_metrics("REAL")
-        v_tot, v_wins, v_wr, v_pf, _ = get_advanced_metrics("VIRTUAL")
-        v_pnl_usd = 0.0
-        try:
-            if os.path.exists(FILES["LOG"]):
-                _h = pd.read_csv(FILES["LOG"])
-                if 'Trade_Mode' in _h.columns:
-                    _h = _h[_h['Trade_Mode'].astype(str).str.upper() == 'VIRTUAL']
-                else:
-                    _h = _h.iloc[0:0]
-                if 'PnL_USD' in _h.columns and len(_h) > 0:
-                    v_pnl_usd = float(pd.to_numeric(_h['PnL_USD'], errors='coerce').fillna(0.0).sum())
-        except Exception as e:
-            log_error("hourly_virtual_metrics", e)
+        tot_trd, wins, b_wr, pf, max_dd = get_advanced_metrics()
         
-        hb_title, hb_msg = format_hourly_report_message(
-            current_time=current_time,
-            real_metrics=(tot_trd, wins, b_wr, pf, max_dd),
-            virtual_metrics=(v_tot, v_wins, v_wr, v_pf, 0.0),
-            v_pnl_usd=v_pnl_usd
+        hb_msg = (
+            f"💵 Kasa: ${state.balance:.2f} (Tepe: ${state.peak_balance:.2f}) | Pozisyon/islem: ${state.dynamic_trade_size:.1f}\n"
+            f"🌍 Piyasa: {state.market_direction_text}\n"
+            f"📊 BTC -> ATR%: {state.btc_atr_pct:.3f} | RSI: {state.btc_rsi:.1f} | ADX: {state.btc_adx:.1f}\n"
+            f"🏆 Performans: {wins}/{tot_trd} islem (%{b_wr} basari) | PF: {pf} | Max DD: %{max_dd:.2f}\n"
+            f"⛔ Reddedilen Sinyal (1s): {state.hourly_missed_signals} adet\n"
+            f"📈 Acik Islem: {len(state.active_positions)}/{CONFIG['MAX_POSITIONS']}\n"
+            f"🔢 Scan ID: {state.scan_id}\n"
+            f"Sistem stabil, disiplin bozulmuyor patron."
         )
         send_ntfy_notification(
-            hb_title,
+            f"⏱️ Saatlik Rapor ({current_time.strftime('%H:00')})",
             hb_msg, tags="clipboard,bar_chart", priority="3"
         )
         state.hourly_missed_signals = 0
@@ -1843,14 +1297,6 @@ def run_bot_cycle():
 # 14. GLOBAL CRASH GUARD
 # ==============================================================
 if __name__ == "__main__":
-    atexit.register(lambda: flush_state_on_shutdown("atexit"))
-    try:
-        signal.signal(signal.SIGTERM, _handle_termination)
-        signal.signal(signal.SIGINT, _handle_termination)
-    except Exception as e:
-        log_error("signal_handler_setup", e)
-    log_storage_diagnostics()
-
     start_msg = (
         f"💵 Guncel Kasa: ${state.balance:.2f}\n"
         f"🛡️ Global Crash Guard Aktif\n"
@@ -1882,16 +1328,6 @@ if __name__ == "__main__":
             "🔄 RESTART — Pozisyonlar Kurtarildi",
             f"{len(state.active_positions)} acik pozisyon devam ediyor:\n{pozlar}\nSure sayaci resetlendi.",
             tags="arrows_counterclockwise,white_check_mark", priority="4"
-        )
-    if state.paper_positions:
-        spoz = ", ".join(
-            f"{sym} {pos['dir']} @ {pos['entry_p']:.5f}"
-            for sym, pos in state.paper_positions.items()
-        )
-        send_ntfy_notification(
-            "RESTART - SANAL POZISYONLAR",
-            f"{len(state.paper_positions)} acik sanal pozisyon devam ediyor:\n{spoz}\nSure sayaci resetlendi.",
-            tags="arrows_counterclockwise,mag", priority="3"
         )
 
     while True:
