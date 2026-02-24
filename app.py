@@ -154,7 +154,9 @@ def json_safe(x):
 
 def ascii_only(text: str) -> str:
     """HTTP header alanlari icin ASCII guvenli metin."""
-    return str(text).encode("ascii", "ignore").decode("ascii")
+    s = str(text).replace("\r", " ").replace("\n", " ")
+    s = s.encode("ascii", "ignore").decode("ascii")
+    return s.strip()
 
 class HunterState:
     def __init__(self):
@@ -286,16 +288,18 @@ def rotate_logs():
 # ==============================================================
 def send_ntfy_notification(title: str, message: str, image_buf=None, tags="robot", priority="3"):
     url = f"https://ntfy.sh/{CONFIG['NTFY_TOPIC']}"
+    safe_title = ascii_only(title) or "RBD-CRYPT"
+    safe_tags = ascii_only(tags) or "robot"
 
     headers = {
-        "Title": ascii_only(title),
-        "Tags": ascii_only(tags),
+        "Title": safe_title,
+        "Tags": safe_tags,
         "Priority": str(priority)
     }
     try:
         if image_buf:
             # Resim varken mesaj header'a gider; sadece ASCII kullan.
-            safe_msg = ascii_only(message.replace('\n', ' | '))
+            safe_msg = ascii_only(message.replace('\n', ' | ')) or "chart"
             headers["Message"] = safe_msg
             headers["Filename"] = "chart.png"
             headers["Content-Type"] = "image/png"
@@ -311,9 +315,9 @@ def send_ntfy_notification(title: str, message: str, image_buf=None, tags="robot
 
 def send_ntfy_file(filepath: str, filename: str, message: str = ""):
     url = f"https://ntfy.sh/{CONFIG['NTFY_TOPIC']}"
-    headers = {"Filename": ascii_only(filename)}
+    headers = {"Filename": (ascii_only(filename) or "file.bin")}
     if message:
-        headers["Message"] = ascii_only(message.replace('\n', ' | '))
+        headers["Message"] = ascii_only(message.replace('\n', ' | ')) or "file"
         
     try:
         with open(filepath, 'rb') as f:
