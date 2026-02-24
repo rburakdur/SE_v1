@@ -211,15 +211,16 @@ def rotate_logs():
 # ==============================================================
 def send_ntfy_notification(title: str, message: str, image_buf=None, tags="robot", priority="3"):
     url = f"https://ntfy.sh/{CONFIG['NTFY_TOPIC']}"
+    # Header değerleri str olmalı — bytes geçilirse requests sessizce hata üretir
     headers = {
-        "Title":    title.encode('utf-8'),
+        "Title":    title,
         "Tags":     tags,
         "Priority": str(priority)
     }
     try:
         if image_buf:
             headers["Filename"] = "chart.png"
-            headers["Message"]  = message.replace('\n', ' | ').encode('utf-8')
+            headers["Message"]  = message.replace('\n', ' | ')
             requests.post(url, data=image_buf.getvalue(), headers=headers, timeout=10)
         else:
             requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=10)
@@ -234,7 +235,7 @@ def send_ntfy_file(filepath: str, filename: str, message: str = ""):
     url = f"https://ntfy.sh/{CONFIG['NTFY_TOPIC']}"
     headers = {"Filename": filename}
     if message:
-        headers["Message"] = message.encode('utf-8')
+        headers["Message"] = message  # str olmalı, bytes değil
     try:
         with open(filepath, 'rb') as f:
             requests.put(url, data=f, headers=headers, timeout=30)
@@ -791,8 +792,17 @@ def ntfy_komut_dinle():
                         continue
                     try:
                         payload = json.loads(line[5:].strip())
-                        mesaj   = payload.get('message', '').strip().lower()
-                        # console.print kaldırıldı — Railway log limiti
+                        # Botun kendi gönderdiği bildirimleri yoksay
+                        # (kendi mesajına tepki vermesin)
+                        baslik = payload.get('title', '')
+                        if any(x in baslik for x in ['İŞLEM', 'BAŞLATILDI', 'ÇÖKTÜ', 
+                                                      'Rapor', 'Döküm', 'RESTART', 'Durum']):
+                            continue
+                        mesaj = payload.get('message', '').strip().lower()
+                        if not mesaj:
+                            continue
+
+                        log_print(f"NTFY KOMUT ALINDI: {mesaj}")
 
                         if mesaj == 'logs':
                             send_ntfy_notification(
