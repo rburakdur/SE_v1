@@ -357,8 +357,15 @@ def create_daily_backup_zip(filepaths: list, tarih_str: str) -> str:
         for fp in filepaths:
             if not os.path.exists(fp):
                 continue
+            # Ayni zip'i tekrar ziplemeye calisirsak OSError olabilir.
+            if os.path.abspath(fp) == os.path.abspath(zip_path):
+                continue
             arcname = os.path.relpath(fp, CONFIG["BASE_PATH"]).replace("\\", "/")
-            zf.write(fp, arcname=arcname)
+            try:
+                zf.write(fp, arcname=arcname)
+            except OSError as e:
+                log_error("create_daily_backup_zip_item", e, fp)
+                continue
     return zip_path
 
 def upload_backup_to_github(zip_path: str, tarih_str: str) -> tuple[bool, str]:
@@ -412,7 +419,12 @@ def gunluk_dump_gonder():
     dosyalar = []
     for root, dirs, files in os.walk(base):
         # _old_ arşivleri ve temp dosyalari atla
-        files = [f for f in files if not f.endswith('.tmp') and '_old_' not in f]
+        files = [
+            f for f in files
+            if not f.endswith('.tmp')
+            and '_old_' not in f
+            and not f.startswith('daily_backup_')
+        ]
         for fname in sorted(files):
             dosyalar.append(os.path.join(root, fname))
 
@@ -424,36 +436,31 @@ def gunluk_dump_gonder():
         )
         return
 
-    # once ozet bildirim gonder
-    dosya_listesi = "\n".join(
-        f"• {os.path.basename(d)}  ({round(os.path.getsize(d)/1024, 1)} KB)"
-        for d in dosyalar
-    )
+    # Spam azaltma: tek tek dosya yerine tek ZIP gonder
+    toplam_kb = round(sum(os.path.getsize(d) for d in dosyalar if os.path.exists(d)) / 1024, 1)
     send_ntfy_notification(
-        f"📦 Gunluk Dokum Başliyor ({tarih_str})",
-        f"Toplam {len(dosyalar)} dosya gonderilecek:\n{dosya_listesi}",
-        tags="package,floppy_disk", priority="4"
+        f"GUNLUK DOKUM BASLIYOR ({tarih_str})",
+        f"Toplam {len(dosyalar)} dosya tek ZIP olarak gonderilecek.\nToplam boyut: {toplam_kb} KB",
+        tags="package,floppy_disk", priority="3"
     )
-    time.sleep(2)
+    time.sleep(1)
 
-    # Dosyalari sirayla gonder
-    for i, filepath in enumerate(dosyalar, 1):
-        try:
-            orijinal_ad = os.path.basename(filepath)
-            kok, uzanti  = os.path.splitext(orijinal_ad)
-            tarihli_ad   = f"{kok}_{tarih_str}{uzanti}"   # hunter_history_2026-02-23.csv
-
-            boyut_kb = round(os.path.getsize(filepath) / 1024, 1)
-            mesaj    = f"[{i}/{len(dosyalar)}] {orijinal_ad} → {boyut_kb} KB"
-
-            send_ntfy_file(filepath, tarihli_ad, mesaj)
-            time.sleep(1.5)   # ntfy rate-limit koruma
-        except Exception as e:
-            log_error("gunluk_dump_gonder", e, filepath)
+    zip_path = ""
+    try:
+        zip_path = create_daily_backup_zip(dosyalar, tarih_str)
+        zip_size_kb = round(os.path.getsize(zip_path) / 1024, 1) if os.path.exists(zip_path) else 0
+        send_ntfy_file(
+            zip_path,
+            os.path.basename(zip_path),
+            f"GUNLUK ZIP | tarih={tarih_str} | dosya={len(dosyalar)} | boyut={zip_size_kb} KB"
+        )
+    except Exception as e:
+        log_error("gunluk_dump_gonder_zip_ntfy", e, tarih_str)
 
     backup_note = "GitHub backup: kapali"
     try:
-        zip_path = create_daily_backup_zip(dosyalar, tarih_str)
+        if not zip_path:
+            zip_path = create_daily_backup_zip(dosyalar, tarih_str)
         zip_size_kb = round(os.path.getsize(zip_path) / 1024, 1) if os.path.exists(zip_path) else 0
         ok, info = upload_backup_to_github(zip_path, tarih_str)
         if ok:
@@ -462,7 +469,7 @@ def gunluk_dump_gonder():
             backup_note = f"GitHub backup yok ({info}) | local zip: {os.path.basename(zip_path)} ({zip_size_kb} KB)"
     except Exception as e:
         log_error("daily_zip_backup", e, tarih_str)
-        backup_note = f"GitHub backup hata: {type(e).__name__}"
+        backup_note = f"GitHub backup hata: {type(e).__name__} | {str(e)[:120]}"
 
     send_ntfy_notification(
         f"GUNLUK DOKUM TAMAMLANDI ({tarih_str})",
