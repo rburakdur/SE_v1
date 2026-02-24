@@ -436,31 +436,12 @@ def gunluk_dump_gonder():
         )
         return
 
-    # Spam azaltma: tek tek dosya yerine tek ZIP gonder
+    # Spam azaltma: tek mesaj (tek ZIP dosya bildirimi)
     toplam_kb = round(sum(os.path.getsize(d) for d in dosyalar if os.path.exists(d)) / 1024, 1)
-    send_ntfy_notification(
-        f"GUNLUK DOKUM BASLIYOR ({tarih_str})",
-        f"Toplam {len(dosyalar)} dosya tek ZIP olarak gonderilecek.\nToplam boyut: {toplam_kb} KB",
-        tags="package,floppy_disk", priority="3"
-    )
-    time.sleep(1)
-
     zip_path = ""
-    try:
-        zip_path = create_daily_backup_zip(dosyalar, tarih_str)
-        zip_size_kb = round(os.path.getsize(zip_path) / 1024, 1) if os.path.exists(zip_path) else 0
-        send_ntfy_file(
-            zip_path,
-            os.path.basename(zip_path),
-            f"GUNLUK ZIP | tarih={tarih_str} | dosya={len(dosyalar)} | boyut={zip_size_kb} KB"
-        )
-    except Exception as e:
-        log_error("gunluk_dump_gonder_zip_ntfy", e, tarih_str)
-
     backup_note = "GitHub backup: kapali"
     try:
-        if not zip_path:
-            zip_path = create_daily_backup_zip(dosyalar, tarih_str)
+        zip_path = create_daily_backup_zip(dosyalar, tarih_str)
         zip_size_kb = round(os.path.getsize(zip_path) / 1024, 1) if os.path.exists(zip_path) else 0
         ok, info = upload_backup_to_github(zip_path, tarih_str)
         if ok:
@@ -471,11 +452,22 @@ def gunluk_dump_gonder():
         log_error("daily_zip_backup", e, tarih_str)
         backup_note = f"GitHub backup hata: {type(e).__name__} | {str(e)[:120]}"
 
-    send_ntfy_notification(
-        f"GUNLUK DOKUM TAMAMLANDI ({tarih_str})",
-        f"Tum {len(dosyalar)} dosya basariyla gonderildi.\n{backup_note}",
-        tags="white_check_mark,moon", priority="3"
-    )
+    try:
+        zip_size_kb = round(os.path.getsize(zip_path) / 1024, 1) if (zip_path and os.path.exists(zip_path)) else 0
+        if zip_path and os.path.exists(zip_path):
+            send_ntfy_file(
+                zip_path,
+                os.path.basename(zip_path),
+                f"GUNLUK DOKUM | tarih={tarih_str} | dosya={len(dosyalar)} | toplam={toplam_kb} KB | zip={zip_size_kb} KB | {backup_note}"
+            )
+        else:
+            send_ntfy_notification(
+                f"GUNLUK DOKUM ({tarih_str})",
+                f"ZIP olusmadi. Dosya sayisi: {len(dosyalar)}\n{backup_note}",
+                tags="warning,package", priority="3"
+            )
+    except Exception as e:
+        log_error("gunluk_dump_gonder_zip_ntfy", e, tarih_str)
 
 # ==============================================================
 # 6. VERI cEKIMI
