@@ -1,5 +1,5 @@
-# ====================== RBD-CRYPT v85.0 Quant Research Engine ======================
-# v84.1'den v85.0'a değişiklikler:
+# ====================== RBD-CRYPT v86.0 Quant Research Engine ======================
+# v84.1'den v86.0'a değişiklikler:
 #   - Tüm 'except: pass' kaldırıldı, her hata error_log.csv'ye yazılıyor
 #   - MIN_ATR_PERCENT filtresi gerçekten uygulanıyor
 #   - score / power_score hesaplamaları gerçek (walk-forward'a hazır)
@@ -77,6 +77,9 @@ if not os.path.exists(CONFIG["BASE_PATH"]):
 # ==============================================================
 # 2. HATA LOGLAMA (Sessiz hataları yakala)
 # ==============================================================
+def get_tr_time() -> datetime:
+    return datetime.utcnow() + timedelta(hours=3)
+
 def log_error(context: str, error: Exception, extra: str = ""):
     """Her exception'ı error_log.csv'ye yazar. Hiçbir hata kaybolmaz."""
     try:
@@ -193,9 +196,6 @@ state = HunterState()
 # ==============================================================
 def clear_terminal():
     pass  # Railway'de terminal temizleme devre dışı — log flood yapar
-
-def get_tr_time() -> datetime:
-    return datetime.utcnow() + timedelta(hours=3)
 
 def rotate_logs():
     for file_key in ["ALL_SIGNALS", "LOG", "MARKET_CONTEXT", "ERROR_LOG"]:
@@ -730,7 +730,7 @@ def draw_fund_dashboard():
     kasa_ok = "+" if state.balance >= CONFIG["STARTING_BALANCE"] else "-"
 
     print("-" * 70, flush=True)
-    log_print(f"RBD-CRYPT v85.0 | Scan #{state.scan_id}")
+    log_print(f"RBD-CRYPT v86.0 | Scan #{state.scan_id}")
     log_print(f"PIYASA : {state.market_direction_text} | BTC ATR%: {state.btc_atr_pct:.3f} | BTC RSI: {state.btc_rsi:.1f} | BTC ADX: {state.btc_adx:.1f}")
     log_print(f"KASA   : ${state.balance:.2f} ({kasa_ok}) | Tepe: ${state.peak_balance:.2f} | Risk/islem: ${state.dynamic_trade_size:.1f}")
     log_print(f"PERFORMANS: {wins}/{tot_trd} islem (%{b_wr} basari) | PF: {pf} | Max DD: %{max_dd:.2f}")
@@ -1193,10 +1193,14 @@ if __name__ == "__main__":
         f"📊 Maksimum Loglama Modu: hunter_history + all_signals + market_context + error_log\n"
         f"🔢 Walk-Forward Hazır: Power Score + Signal Score + Config Snapshot\n"
         f"💾 Log Rotation & RAM Koruması Devrede\n"
-        f"Scan ID: {state.scan_id} | v85.0 production modunda başlatıldı!"
+        f"Scan ID: {state.scan_id} | v86.0 production modunda başlatıldı!"
     )
+    log_print("=" * 50)
+    log_print("RBD-CRYPT v86.0 BASLATILDI")
+    log_print(f"Kasa: ${state.balance:.2f} | Scan ID: {state.scan_id}")
+    log_print("=" * 50)
     send_ntfy_notification(
-        "🚀 v85.0 BAŞLATILDI",
+        "🚀 v86.0 BAŞLATILDI",
         start_msg, tags="rocket,shield", priority="4"
     )
 
