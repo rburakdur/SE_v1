@@ -130,6 +130,20 @@ def get_trading_day_time(now=None) -> datetime:
 def get_trading_day_str(now=None) -> str:
     return get_trading_day_time(now).strftime('%Y-%m-%d')
 
+def calc_tp_sl_metrics(entry_p: float, sl_p: float, tp_p: float, direction: str) -> tuple[float, float, float]:
+    """Acilis bildirimleri icin TP/SL yuzde ve R:R hesapla."""
+    entry = float(entry_p)
+    sl = float(sl_p)
+    tp = float(tp_p)
+    if str(direction).upper() == "LONG":
+        sl_pct = abs((entry - sl) / max(entry, 1e-12) * 100)
+        tp_pct = abs((tp - entry) / max(entry, 1e-12) * 100)
+    else:
+        sl_pct = abs((sl - entry) / max(entry, 1e-12) * 100)
+        tp_pct = abs((entry - tp) / max(entry, 1e-12) * 100)
+    rr = tp_pct / max(sl_pct, 1e-9)
+    return tp_pct, sl_pct, rr
+
 def log_error(context: str, error: Exception, extra: str = ""):
     """Her exception'i error_log.csv'ye yazar. Hicbir hata kaybolmaz."""
     try:
@@ -1108,10 +1122,12 @@ def maybe_open_paper_position(sym: str, df: pd.DataFrame, row_closed, signal: st
 
         try:
             chart_buf = create_trade_chart(df, sym, state.paper_positions[sym], is_entry=True)
+            tp_pct, sl_pct, rr = calc_tp_sl_metrics(entry_p, sl_p, tp_p, signal)
             send_ntfy_notification(
                 f"SANAL ISLEM ACILDI: {sym}",
                 f"Yon: {signal} | Fiyat: {entry_p:.5f}\n"
-                f"SL: {sl_p:.5f} | TP: {tp_p:.5f}\n"
+                f"SL: {sl_p:.5f} (-%{sl_pct:.2f}) | TP: {tp_p:.5f} (+%{tp_pct:.2f})\n"
+                f"Hedef/Risk (R:R): {rr:.2f}\n"
                 f"Pozisyon(sim): ${v_size:.2f} | Power: {power_score:.1f} | Score: {signal_score}/6\n"
                 f"Neden: {reason or 'SHORTLIST'}",
                 image_buf=chart_buf, tags="mag,chart_with_upwards_trend", priority="3"
@@ -1779,10 +1795,12 @@ def run_bot_cycle():
 
                     try:
                         chart_buf = create_trade_chart(df, sym, state.active_positions[sym], is_entry=True)
+                        tp_pct, sl_pct, rr = calc_tp_sl_metrics(entry_p, sl_p, tp_p, signal)
                         send_ntfy_notification(
                             f"GERCEK ISLEM ACILDI: {sym}",
                             f"Yon: {signal} | Fiyat: {entry_p:.5f}\n"
-                            f"SL: {sl_p:.5f} | TP: {tp_p:.5f}\n"
+                            f"SL: {sl_p:.5f} (-%{sl_pct:.2f}) | TP: {tp_p:.5f} (+%{tp_pct:.2f})\n"
+                            f"Hedef/Risk (R:R): {rr:.2f}\n"
                             f"Pozisyon: ${t_size:.2f} | Power: {power_score} | Score: {signal_score}/6",
                             image_buf=chart_buf, tags="chart_with_upwards_trend", priority="4"
                         )
