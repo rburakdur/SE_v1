@@ -96,7 +96,6 @@ def log_error(context: str, error: Exception, extra: str = ""):
             header=not os.path.exists(FILES["ERROR_LOG"]),
             index=False
         )
-        pass  # Hata sadece CSV'ye yazılıyor, Railway log flood olmasın
     except Exception:
         pass  # Loglama kendisi patlarsa yapacak bir şey yok
 
@@ -106,12 +105,10 @@ def log_error(context: str, error: Exception, extra: str = ""):
 class HunterState:
     def __init__(self):
         self.current_coin = "Baslatiliyor..."
-        self.progress_pct = 0
         self.processed_count = 0
         self.total_count = 0
         self.status = "BASLATILIYOR"
         self.is_scanning = False
-        self.ranking_data = {}
         self.cooldowns = {}
         self.market_direction_text = "Hesaplaniyor..."
         self.missed_this_scan = 0
@@ -121,7 +118,6 @@ class HunterState:
         self.last_heartbeat_hour = (datetime.utcnow() + timedelta(hours=3)).hour
         self.last_dump_day = -1
         # BTC context — her scan güncellenir, loglarda kullanılır
-        self.btc_trend_val = 0
         self.btc_atr_pct = 0.0
         self.btc_rsi = 0.0
         self.btc_adx = 0.0
@@ -194,9 +190,6 @@ state = HunterState()
 # ==============================================================
 # 4. YARDIMCI FONKSİYONLAR
 # ==============================================================
-def clear_terminal():
-    pass  # Railway'de terminal temizleme devre dışı — log flood yapar
-
 def rotate_logs():
     for file_key in ["ALL_SIGNALS", "LOG", "MARKET_CONTEXT", "ERROR_LOG"]:
         path = FILES[file_key]
@@ -291,7 +284,6 @@ def gunluk_dump_gonder():
             mesaj    = f"[{i}/{len(dosyalar)}] {orijinal_ad} → {boyut_kb} KB"
 
             send_ntfy_file(filepath, tarihli_ad, mesaj)
-            pass  # dosya gönderildi, log flood olmasın
             time.sleep(1.5)   # ntfy rate-limit koruma
         except Exception as e:
             log_error("gunluk_dump_gonder", e, filepath)
@@ -312,8 +304,7 @@ def safe_api_get(url: str, params=None, retries=5):
             if r.status_code == 200:
                 return r.json()
             elif r.status_code == 429:
-                pass  # 429 bekleniyor
-                time.sleep(10)
+                time.sleep(10)  # Rate limit — bekle
             else:
                 time.sleep(2)
         except requests.exceptions.RequestException as e:
@@ -383,6 +374,11 @@ def hesapla_indikatorler(df: pd.DataFrame) -> pd.DataFrame:
     trend   = np.ones(len(c))
 
     for i in range(1, len(c)):
+        if np.isnan(atr_st[i]) or np.isnan(hl2[i]):
+            # ATR henüz hesaplanamadı (ilk N bar) — önceki değeri koru
+            st_line[i] = st_line[i-1]
+            trend[i]   = trend[i-1]
+            continue
         up = hl2[i] + CONFIG["ST_M"] * atr_st[i]
         dn = hl2[i] - CONFIG["ST_M"] * atr_st[i]
         if c[i-1] > st_line[i-1]:
@@ -397,8 +393,9 @@ def hesapla_indikatorler(df: pd.DataFrame) -> pd.DataFrame:
     df['TREND']      = trend
     df['ST_LINE']    = st_line
     df['ST_DIST_PCT'] = ((df['close'] - df['ST_LINE']) / df['close']) * 100  # YENİ
-    df['FLIP_LONG']  = (df['TREND'] == 1) & ((df['TREND'].shift(1) == -1) | (df['TREND'].shift(2) == -1))
-    df['FLIP_SHORT'] = (df['TREND'] == -1) & ((df['TREND'].shift(1) == 1) | (df['TREND'].shift(2) == 1))
+    # FLIP: sadece bir önceki barda yön değişimi — daha temiz sinyal
+    df['FLIP_LONG']  = (df['TREND'] == 1) & (df['TREND'].shift(1) == -1)
+    df['FLIP_SHORT'] = (df['TREND'] == -1) & (df['TREND'].shift(1) == 1)
 
     # Price action
     df['BODY_PCT']   = abs(df['close'] - df['open']) / df['open'] * 100      # YENİ
@@ -524,12 +521,13 @@ def get_btc_context() -> dict:
 # 10. LOGLAMA
 # ==============================================================
 def log_trade_to_csv(trade_dict: dict):
-    """Kapanan işlemi hunter_history.csv'ye yazar. Geniş şema."""
+    """Kapanan işlemi hunter_history.csv'ye yazar. Append mode — tüm dosyayı okumaz."""
     try:
-        df = pd.read_csv(FILES["LOG"]) if os.path.exists(FILES["LOG"]) else pd.DataFrame()
-        new_row = pd.DataFrame([trade_dict])
-        df = pd.concat([df, new_row], ignore_index=True)
-        df.to_csv(FILES["LOG"], index=False, encoding='utf-8-sig')
+        pd.DataFrame([trade_dict]).to_csv(
+            FILES["LOG"], mode='a',
+            header=not os.path.exists(FILES["LOG"]),
+            index=False, encoding='utf-8-sig'
+        )
     except Exception as e:
         log_error("log_trade_to_csv", e)
 
@@ -783,7 +781,7 @@ def ntfy_komut_dinle():
 
     while True:
         try:
-            with requests.get(url, stream=True, timeout=None) as resp:
+            with requests.get(url, stream=True, timeout=(10, 90)) as resp:  # (connect, read) timeout
                 for line in resp.iter_lines():
                     if not line:
                         continue
@@ -831,7 +829,7 @@ def ntfy_komut_dinle():
                                 durum_msg, tags="bar_chart", priority="3"
                             )
 
-                    except (json.JSONDecodeError, Exception) as e:
+                    except Exception as e:
                         log_error("ntfy_komut_parse", e, line[:100])
 
         except Exception as e:
@@ -853,7 +851,6 @@ def run_bot_cycle():
 
     # --- BTC Context ---
     btc_ctx = get_btc_context()
-    state.btc_trend_val = btc_ctx["trend"]
     state.btc_atr_pct   = btc_ctx["atr_pct"]
     state.btc_rsi       = btc_ctx["rsi"]
     state.btc_adx       = btc_ctx["adx"]
@@ -1036,6 +1033,7 @@ def run_bot_cycle():
 
                     del state.active_positions[sym]
                     state.save_state()
+                    continue  # Aynı scan'de re-entry engeli
 
             # ── B. YENİ SİNYAL ────────────────────────────────────────
             row_closed = df.iloc[-2]
@@ -1049,6 +1047,8 @@ def run_bot_cycle():
 
                 if power_score < CONFIG["MIN_POWER_SCORE"]:
                     reason = f"LOW_POWER_{power_score:.0f}"
+                elif btc_ctx["trend"] == 0:
+                    reason = "BTC_VERI_YOK"  # BTC verisi gelmedi, trading durduruldu
                 elif signal == "LONG" and btc_ctx["trend"] != 1:
                     reason = "BTC_TREND_KOTU"
                 elif signal == "SHORT" and btc_ctx["trend"] != -1:
