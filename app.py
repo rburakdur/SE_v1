@@ -299,10 +299,12 @@ def send_ntfy_notification(title: str, message: str, image_buf=None, tags="robot
             headers["Message"] = safe_msg
             headers["Filename"] = "chart.png"
             headers["Content-Type"] = "image/png"
-            requests.post(url, data=image_buf.getvalue(), headers=headers, timeout=12)
+            resp = requests.post(url, data=image_buf.getvalue(), headers=headers, timeout=12)
         else:
             # Resim yoksa mesaj BODY'de gider (UTF-8 direkt destekler)
-            requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=12)
+            resp = requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=12)
+        if resp.status_code >= 400:
+            raise requests.HTTPError(f"ntfy status={resp.status_code} body={resp.text[:200]}")
     except Exception as e:
         print(f"!!! NTFY Hatasi: {e}")
         log_error("send_ntfy_notification", e, title)
@@ -315,7 +317,9 @@ def send_ntfy_file(filepath: str, filename: str, message: str = ""):
         
     try:
         with open(filepath, 'rb') as f:
-            requests.put(url, data=f, headers=headers, timeout=30)
+            resp = requests.put(url, data=f, headers=headers, timeout=30)
+        if resp.status_code >= 400:
+            raise requests.HTTPError(f"ntfy file status={resp.status_code} body={resp.text[:200]}")
     except Exception as e:
         log_error("send_ntfy_file", e, filename)
 
