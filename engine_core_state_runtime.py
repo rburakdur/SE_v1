@@ -45,13 +45,16 @@ def log_error(context: str, error: Exception, extra: str = ""):
     import app as A
 
     try:
+        err_msg = str(error).replace("\r", " ").replace("\n", " ")
+        extra_s = str(extra).replace("\r", " ").replace("\n", " | ")
         row = {
             "timestamp": get_tr_time().isoformat(),
             "context": context,
             "error_type": type(error).__name__,
-            "error_msg": str(error)[:300],
-            "traceback": A.traceback.format_exc()[-500:],
-            "extra": extra,
+            "error_msg": err_msg[:300],
+            # Tek satır traceback -> CSV parser dayanıklılığı artar (yarım yazım riskinde daha az bozulur).
+            "traceback": A.traceback.format_exc().replace("\r", " ").replace("\n", " | ")[-700:],
+            "extra": extra_s[:500],
         }
         A.pd.DataFrame([row]).to_csv(
             A.FILES["ERROR_LOG"],
@@ -249,4 +252,3 @@ def rotate_logs():
                 A.os.rename(path, path + f"_old_{int(A.time.time())}")
         except Exception as e:
             A.log_error("rotate_logs", e, file_key)
-

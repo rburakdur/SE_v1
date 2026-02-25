@@ -116,6 +116,88 @@ def draw_fund_dashboard():
     print("-" * 70, flush=True)
 
 
+def _reset_generated_runtime_data():
+    import app as A
+
+    base = A.CONFIG["BASE_PATH"]
+    deleted = []
+    failed = []
+
+    primary_keys = ["LOG", "ALL_SIGNALS", "MARKET_CONTEXT", "ERROR_LOG", "ACTIVE", "PAPER_ACTIVE", "STATE"]
+    for key in primary_keys:
+        p = A.FILES.get(key)
+        if not p:
+            continue
+        try:
+            if A.os.path.exists(p):
+                A.os.remove(p)
+                deleted.append(p)
+            tmp_p = p + ".tmp"
+            if A.os.path.exists(tmp_p):
+                A.os.remove(tmp_p)
+                deleted.append(tmp_p)
+        except Exception as e:
+            failed.append((p, type(e).__name__))
+            A.log_error("reset_generated_remove_primary", e, p)
+
+    prefixes = (
+        "hunter_history.csv_old_",
+        "hunter_history.csv_old_schema_",
+        "all_signals.csv_old_",
+        "all_signals.csv_old_schema_",
+        "market_context.csv_old_",
+        "market_context.csv_old_schema_",
+        "error_log.csv_old_",
+        "error_log.csv_old_schema_",
+        "daily_backup_",
+    )
+    try:
+        for root, _, files in A.os.walk(base):
+            for fname in files:
+                if not any(fname.startswith(px) for px in prefixes):
+                    continue
+                fp = A.os.path.join(root, fname)
+                try:
+                    A.os.remove(fp)
+                    deleted.append(fp)
+                except Exception as e:
+                    failed.append((fp, type(e).__name__))
+                    A.log_error("reset_generated_remove_rotated", e, fp)
+    except Exception as e:
+        A.log_error("reset_generated_walk", e, base)
+
+    try:
+        A.state.active_positions = {}
+        A.state.paper_positions = {}
+        A.state.cooldowns = {}
+        A.state.son_sinyaller = []
+        A.state.processed_count = 0
+        A.state.total_count = 0
+        A.state.current_coin = "Reset"
+        A.state.is_scanning = False
+        A.state.status = "MANUAL RESET (NTFY)"
+        A.state.missed_this_scan = 0
+        A.state.hourly_missed_signals = 0
+        A.state.balance = float(A.CONFIG["STARTING_BALANCE"])
+        A.state.peak_balance = float(A.CONFIG["STARTING_BALANCE"])
+        A.state.scan_id = 0
+        A.state.last_dump_trading_day = ""
+        A.state.last_balance_reset_trading_day = ""
+        A.state.btc_atr_pct = 0.0
+        A.state.btc_rsi = 0.0
+        A.state.btc_adx = 0.0
+        A.state.btc_vol_ratio = 0.0
+        A.state.is_chop_market = False
+        try:
+            A.state.last_heartbeat_hour = A.get_tr_time().hour
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    return deleted, failed
+
+
 def ntfy_komut_dinle():
     import app as A
 
@@ -148,6 +230,20 @@ def ntfy_komut_dinle():
                                 priority="3",
                             )
                             A.threading.Thread(target=A.gunluk_dump_gonder, daemon=True).start()
+                        elif mesaj in ("resetlogs", "logreset", "logsil", "clearlogs", "resetall", "fullreset", "temizbasla"):
+                            deleted, failed = _reset_generated_runtime_data()
+                            A.send_ntfy_notification(
+                                "FULL RESET OK",
+                                (
+                                    f"Silinen dosya (log/json/backup): {len(deleted)}\n"
+                                    f"Hata: {len(failed)}\n"
+                                    "Temizlenenler: loglar + active/paper/state json + backup zip\n"
+                                    f"Acik pozisyon: Gercek {len(A.state.active_positions)} | Sanal {len(A.state.paper_positions)}\n"
+                                    f"Kasa reset: ${float(A.state.balance):.2f} | Scan ID: {int(A.state.scan_id)}"
+                                ),
+                                tags="wastebasket,arrows_counterclockwise",
+                                priority="4" if not failed else "3",
+                            )
                         elif mesaj in ("durum", "status"):
                             real_stats = A.get_trade_performance_snapshot("REAL")
                             virtual_stats = A.get_trade_performance_snapshot("VIRTUAL")
@@ -172,4 +268,3 @@ def ntfy_komut_dinle():
         except Exception as e:
             A.log_error("ntfy_komut_dinle", e)
             A.time.sleep(15)
-

@@ -1,18 +1,69 @@
 import os
+import time
+import csv
 
 import pandas as pd
+
+TRADE_LOG_COLUMNS = [
+    "Trade_Mode", "Scan_ID", "Restarted", "Tarih", "Giris_Saati", "Cikis_Saati", "Hold_Dakika",
+    "Coin", "Yon",
+    "Giris_Fiyati", "Cikis_Fiyati", "TP_Seviyesi", "SL_Seviyesi", "TP_SL_Orani",
+    "Risk_USD", "PnL_Yuzde", "PnL_USD", "Kasa_Son_Durum", "Sonuc",
+    "Giris_RSI", "Giris_ADX", "Giris_VOL_RATIO", "Giris_ATR_PCT", "Giris_Power_Score", "Giris_Score",
+    "Cikis_RSI", "Cikis_ADX", "Cikis_VOL_RATIO", "Cikis_ATR_PCT", "Cikis_TREND", "Cikis_MACD_HIST",
+    "BTC_Trend", "BTC_ATR_PCT", "BTC_RSI", "BTC_ADX", "BTC_Vol_Ratio",
+    "Cfg_ST_M", "Cfg_RSI_Long", "Cfg_RSI_Short", "Cfg_VOL_Filter", "Cfg_ADX_Thr", "Cfg_SL_M", "Cfg_TP_M",
+]
+
+
+def _normalize_trade_log_row(trade_dict: dict) -> dict:
+    row = {k: trade_dict.get(k, "") for k in TRADE_LOG_COLUMNS}
+    # Eski/alternatif key yazımları için fallback
+    if row["BTC_Vol_Ratio"] == "" and "BTC_VOL_RATIO" in trade_dict:
+        row["BTC_Vol_Ratio"] = trade_dict.get("BTC_VOL_RATIO", "")
+    return row
+
+
+def _append_row_csv_schema_guard(path: str, row: dict, *, encoding: str, log_error_fn, context: str):
+    """
+    Dosya header'ı değiştiyse eski dosyayı schema-suffix ile döndürüp yeni header ile devam eder.
+    Böylece aynı CSV içinde farklı kolon sayıları karışmaz.
+    """
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            try:
+                with open(path, "r", encoding=encoding, newline="") as f:
+                    existing_header = next(csv.reader(f), [])
+            except UnicodeDecodeError:
+                with open(path, "r", newline="") as f:
+                    existing_header = next(csv.reader(f), [])
+            new_header = list(row.keys())
+            if list(existing_header) != new_header:
+                rotated = f"{path}_old_schema_{int(time.time())}"
+                os.replace(path, rotated)
+    except Exception as e:
+        log_error_fn(f"{context}_schema_guard", e, path)
+
+    pd.DataFrame([row]).to_csv(
+        path,
+        mode="a",
+        header=not os.path.exists(path),
+        index=False,
+        encoding=encoding,
+    )
 
 
 def log_trade_to_csv(trade_dict: dict):
     import app as A
 
     try:
-        pd.DataFrame([trade_dict]).to_csv(
+        normalized = _normalize_trade_log_row(trade_dict)
+        _append_row_csv_schema_guard(
             A.FILES["LOG"],
-            mode="a",
-            header=not os.path.exists(A.FILES["LOG"]),
-            index=False,
+            normalized,
             encoding="utf-8-sig",
+            log_error_fn=A.log_error,
+            context="log_trade_to_csv",
         )
     except Exception as e:
         A.log_error("log_trade_to_csv", e)
@@ -111,11 +162,12 @@ def log_potential_signal(
             "decision_auto_entry_eligible": bool(decision_meta.get("auto_entry_eligible", False)),
             "rejection_stage": str(decision_meta.get("rejection_stage", "")),
         }
-        pd.DataFrame([log_row]).to_csv(
+        _append_row_csv_schema_guard(
             A.FILES["ALL_SIGNALS"],
-            mode="a",
-            header=not os.path.exists(A.FILES["ALL_SIGNALS"]),
-            index=False,
+            log_row,
+            encoding="utf-8-sig",
+            log_error_fn=A.log_error,
+            context="log_potential_signal",
         )
     except Exception as e:
         A.log_error("log_potential_signal", e, sym)
@@ -142,12 +194,12 @@ def log_market_context(btc_ctx: dict, coin_count: int, open_pos: int):
             "open_positions": open_pos,
             "balance": round(A.state.balance, 2),
         }
-        pd.DataFrame([row]).to_csv(
+        _append_row_csv_schema_guard(
             A.FILES["MARKET_CONTEXT"],
-            mode="a",
-            header=not os.path.exists(A.FILES["MARKET_CONTEXT"]),
-            index=False,
+            row,
+            encoding="utf-8-sig",
+            log_error_fn=A.log_error,
+            context="log_market_context",
         )
     except Exception as e:
         A.log_error("log_market_context", e)
-

@@ -1,3 +1,4 @@
+import csv
 import os
 from typing import Callable, Optional
 
@@ -63,6 +64,66 @@ def _read_hunter_log_df(log_path: str, log_error: LogErrorFn = None) -> pd.DataF
         return pd.DataFrame()
 
 
+def _read_hunter_log_mixed_schema_metrics_df(log_path: str, log_error: LogErrorFn = None) -> pd.DataFrame:
+    """
+    hunter_history.csv aynı dosyada birden fazla şema ile append edildiğinde
+    (örn. 42 kolon eski, 43 kolon yeni REAL, 36 kolon VIRTUAL) metrik için
+    gerekli kolonları satır bazında güvenli çıkarır.
+    """
+    if not log_path or not os.path.exists(log_path):
+        return pd.DataFrame()
+
+    mode_tokens = {"REAL", "VIRTUAL", "PAPER", "SIM", "SANAL"}
+    out_rows = []
+    try:
+        with open(log_path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader, [])
+            header_map = {str(c): i for i, c in enumerate(header)}
+            header_len = len(header)
+            has_trade_mode_header = "Trade_Mode" in header_map
+
+            for line_no, row in enumerate(reader, start=2):
+                if not row:
+                    continue
+                try:
+                    first = str(row[0]).strip().upper() if row else ""
+                    explicit_mode = first if first in mode_tokens else None
+                    rec = {"_line_no": line_no, "_row_len": len(row)}
+
+                    if explicit_mode and len(row) >= 19:
+                        # Yeni şemalar: Trade_Mode ve Restarted başta, PnL blokları sabit indekslerde.
+                        rec["Trade_Mode"] = explicit_mode
+                        rec["Scan_ID"] = row[1] if len(row) > 1 else None
+                        rec["Tarih"] = row[3] if len(row) > 3 else None
+                        rec["Coin"] = row[7] if len(row) > 7 else None
+                        rec["PnL_Yuzde"] = row[15] if len(row) > 15 else None
+                        rec["PnL_USD"] = row[16] if len(row) > 16 else None
+                        rec["Kasa_Son_Durum"] = row[17] if len(row) > 17 else None
+                        rec["Sonuc"] = row[18] if len(row) > 18 else None
+                        out_rows.append(rec)
+                        continue
+
+                    if header_len and len(row) == header_len:
+                        # Eski/uyumlu header satırı: header map ile oku.
+                        rec["Trade_Mode"] = row[header_map["Trade_Mode"]] if has_trade_mode_header else "REAL"
+                        for col in ("Scan_ID", "Tarih", "Coin", "PnL_Yuzde", "PnL_USD", "Kasa_Son_Durum", "Sonuc"):
+                            idx = header_map.get(col)
+                            rec[col] = row[idx] if idx is not None and idx < len(row) else None
+                        out_rows.append(rec)
+                        continue
+                except Exception as row_err:
+                    _safe_log_error(log_error, "_read_hunter_log_mixed_schema_metrics_df_row", row_err, f"line={line_no}")
+                    continue
+    except Exception as e:
+        _safe_log_error(log_error, "_read_hunter_log_mixed_schema_metrics_df", e, str(log_path))
+        return pd.DataFrame()
+
+    if not out_rows:
+        return pd.DataFrame()
+    return pd.DataFrame(out_rows)
+
+
 def _normalize_hunter_log_df(df: pd.DataFrame, log_error: LogErrorFn = None) -> pd.DataFrame:
     if df is None or len(df) == 0:
         return pd.DataFrame() if df is None else df
@@ -96,7 +157,10 @@ def _filter_hunter_log_by_trade_mode(df: pd.DataFrame, trade_mode: str = "REAL")
 
 
 def _get_hunter_log_for_metrics(log_path: str, trade_mode: str = "REAL", log_error: LogErrorFn = None) -> pd.DataFrame:
-    df = _read_hunter_log_df(log_path, log_error=log_error)
+    # Önce mixed-schema dayanıklı parser; boş dönerse pandas fallback.
+    df = _read_hunter_log_mixed_schema_metrics_df(log_path, log_error=log_error)
+    if len(df) == 0:
+        df = _read_hunter_log_df(log_path, log_error=log_error)
     if len(df) == 0:
         return df
     df = _normalize_hunter_log_df(df, log_error=log_error)
@@ -241,4 +305,3 @@ def get_advanced_metrics(
         snapshot["pf"],
         snapshot["max_dd"],
     )
-

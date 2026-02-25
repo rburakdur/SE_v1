@@ -5,6 +5,21 @@ import zipfile
 import requests
 
 
+def _sanitize_body_text(text: str, ascii_only_fn) -> str:
+    """
+    Bildirimlerde mojibake/encoding bozukluğu görünmesin diye body'yi ASCII-safe yap.
+    Satır kırılımlarını korur.
+    """
+    raw = str(text or "")
+    lines = raw.splitlines() or [raw]
+    cleaned = []
+    for line in lines:
+        cleaned_line = ascii_only_fn(line)
+        cleaned.append(cleaned_line if cleaned_line is not None else "")
+    body = "\n".join(cleaned).strip()
+    return body or (ascii_only_fn(raw) or "")
+
+
 def send_ntfy_notification(
     *,
     topic: str,
@@ -29,7 +44,8 @@ def send_ntfy_notification(
             headers["Content-Type"] = "image/png"
             resp = requests.post(url, data=image_buf.getvalue(), headers=headers, timeout=12)
         else:
-            resp = requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=12)
+            safe_body = _sanitize_body_text(message, ascii_only_fn)
+            resp = requests.post(url, data=safe_body.encode("utf-8"), headers=headers, timeout=12)
         if resp.status_code >= 400:
             raise requests.HTTPError(f"ntfy status={resp.status_code} body={resp.text[:200]}")
     except Exception as e:
@@ -108,4 +124,3 @@ def upload_backup_to_github(*, zip_path: str, tarih_str: str, config: dict, log_
     except Exception as e:
         log_error_fn("upload_backup_to_github", e, os.path.basename(zip_path))
         return False, type(e).__name__
-

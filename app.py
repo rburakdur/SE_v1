@@ -26,6 +26,7 @@ import concurrent.futures
 import threading
 import signal
 import atexit
+import sys
 import base64
 import zipfile
 import matplotlib
@@ -33,6 +34,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime, timedelta
+
+# Runtime modullerinin `import app` cagrisinda ikinci module instance acmamasini sagla.
+sys.modules.setdefault("app", sys.modules[__name__])
 from engine_metrics import (
     calc_real_mdd_from_trade_log as engine_calc_real_mdd_from_trade_log,
     get_advanced_metrics as engine_get_advanced_metrics,

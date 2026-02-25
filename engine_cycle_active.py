@@ -92,7 +92,7 @@ def process_active_real_position(sym: str, df, btc_ctx: dict) -> bool:
         "Cikis_Fiyati": round(curr_c, 6),
         "TP_Seviyesi": round(pos["tp"], 6),
         "SL_Seviyesi": round(pos["sl"], 6),
-        "TP_SL_Orani": round(abs(pos["tp"] - entry_p) / abs(pos["sl"] - entry_p), 3),
+        "TP_SL_Orani": round(abs(pos["tp"] - entry_p) / max(abs(pos["sl"] - entry_p), 1e-12), 3),
         "Risk_USD": round(trade_size, 2),
         "PnL_Yuzde": round(pnl, 2),
         "PnL_USD": round(pnl_usd, 2),
@@ -142,4 +142,3 @@ def process_active_real_position(sym: str, df, btc_ctx: dict) -> bool:
     del A.state.active_positions[sym]
     A.state.save_state()
     return True
-
