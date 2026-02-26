@@ -11,6 +11,7 @@ from ..models.error_event import ErrorEvent
 from ..models.market_context import MarketContext
 from ..models.signal import SignalEvent
 from ..models.symbol_state import SymbolBarState
+from ..notifications.ntfy_client import NtfyClient
 from ..storage.repositories import Repositories
 from ..strategy.parity_signal_engine import ParitySignalEngine
 
@@ -41,6 +42,7 @@ class ScanService:
         repos: Repositories,
         now_fn: Callable[[], datetime],
         logger,
+        notifier: NtfyClient | None = None,
     ) -> None:
         self.settings = settings
         self.fetcher = fetcher
@@ -48,6 +50,7 @@ class ScanService:
         self.repos = repos
         self.now_fn = now_fn
         self.logger = logger
+        self.notifier = notifier
 
     def scan_once(self) -> ScanRunResult:
         started = self.now_fn()
@@ -134,8 +137,8 @@ class ScanService:
             "finished_at": finished.isoformat(),
             "scanned_symbols": len(signals),
             "errors": error_count,
-                "auto_signals": sum(1 for s in signals if s.auto_pass),
-            }
+            "auto_signals": sum(1 for s in signals if s.auto_pass),
+        }
         self.repos.runtime_state.set_json("last_scan", payload)
         self.repos.heartbeats.insert(
             component="scanner",
@@ -146,6 +149,22 @@ class ScanService:
             "scan_completed",
             extra={"event": {"scanned": len(signals), "errors": error_count, "auto": payload["auto_signals"]}},
         )
+        if self.settings.notifications.notify_on_scan_degraded and error_count > 0:
+            self._notify(
+                "rbdcrypt: scan degraded",
+                f"errors={error_count} scanned={len(signals)} auto={payload['auto_signals']}",
+                priority=4,
+                tags="warning",
+            )
+        if self.settings.notifications.notify_on_auto_signal_summary and payload["auto_signals"] > 0:
+            top = sorted((s for s in signals if s.auto_pass), key=lambda x: x.power_score, reverse=True)[:5]
+            lines = [f"{s.symbol} {s.direction.value.upper()} score={s.power_score:.1f}" for s in top]
+            self._notify(
+                "rbdcrypt: auto signals",
+                "\n".join(lines),
+                priority=3,
+                tags="chart_with_upwards_trend",
+            )
         return ScanRunResult(
             started_at=started,
             finished_at=finished,
@@ -172,3 +191,18 @@ class ScanService:
             "scan_error",
             extra={"event": {"source": source, "type": exc.__class__.__name__, "msg": str(exc), **context}},
         )
+        if self.settings.notifications.notify_on_runtime_error and source not in {"scan_service.fetch_candles", "scan_service.symbol"}:
+            self._notify(
+                "rbdcrypt: scan error",
+                f"{source} {exc.__class__.__name__}: {exc}",
+                priority=5,
+                tags="rotating_light",
+            )
+
+    def _notify(self, title: str, message: str, *, priority: int = 3, tags: str | None = None) -> None:
+        if self.notifier is None:
+            return
+        try:
+            self.notifier.notify(title, message, priority=priority, tags=tags)
+        except Exception as exc:
+            self.logger.error("ntfy_error", extra={"event": {"source": "scan_service", "msg": str(exc)}})

@@ -75,6 +75,7 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
         repos=repos,
         now_fn=clock.now,
         logger=logger,
+        notifier=notifier,
     )
     trade_service = TradeService.from_settings(
         settings=settings,
@@ -82,6 +83,7 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
         repos=repos,
         now_fn=clock.now,
         logger=logger,
+        notifier=notifier,
     )
     metrics_service = MetricsService(repos=repos)
     housekeeping_service = HousekeepingService(settings=settings, repos=repos)

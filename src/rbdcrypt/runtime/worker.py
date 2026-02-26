@@ -63,6 +63,19 @@ class RuntimeWorker:
                     "cycle_error",
                     extra={"event": {"type": exc.__class__.__name__, "msg": str(exc), "attempt": loop_errors}},
                 )
+                if self.runtime.settings.notifications.notify_on_runtime_error:
+                    try:
+                        self.runtime.notifier.notify(
+                            "rbdcrypt: cycle error",
+                            f"{exc.__class__.__name__}: {exc} (attempt={loop_errors})",
+                            priority=5,
+                            tags="rotating_light",
+                        )
+                    except Exception as ntfy_exc:
+                        self.runtime.logger.error(
+                            "ntfy_error",
+                            extra={"event": {"source": "runtime.worker", "msg": str(ntfy_exc)}},
+                        )
                 if loop_errors >= self.runtime.settings.runtime.max_loop_errors_before_sleep:
                     time.sleep(self.runtime.settings.runtime.loop_error_sleep_sec)
                     loop_errors = 0

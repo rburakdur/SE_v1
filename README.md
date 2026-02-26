@@ -18,7 +18,6 @@ Python tabanlı, modüler, düşük kaynak dostu kripto futures signal/trading e
   - ATR çarpanlı TP/SL (`SL_M`, `TP_M` parity)
   - timeout + ST grace + trend flip + stale exit + max-hold sonrası break-even move
   - cooldown (entry block) + missed-signal counters (SQLite runtime_state)
-- CLI komutları: `run`, `doctor`, `analyze`, `rotate/prune`, `export-csv`, `backfill` (placeholder)
 - CLI komutları: `run`, `doctor`, `analyze`, `rotate/prune`, `export-csv`, `backfill`, `replay`
 - Testler: strategy/risk/exit/recovery/sqlite atomicity çekirdeği
 
@@ -118,6 +117,28 @@ Tüm threshold ve davranışlar config üzerindedir; magic number bırakmamaya o
 - `RUNTIME__MAX_SYMBOLS`: varsayılan `50`
 - `RUNTIME__CHART_ENABLED`: varsayılan `false`
 - `RUNTIME__HEAVY_DEBUG`: varsayılan `false`
+
+## Ntfy Bildirimleri
+
+`.env` içinde aşağıdakileri açın:
+
+```env
+NOTIFICATIONS__ENABLED=true
+NOTIFICATIONS__NTFY_URL=https://ntfy.sh
+NOTIFICATIONS__TOPIC=<senin_topic_adin>
+NOTIFICATIONS__NOTIFY_ON_OPEN=true
+NOTIFICATIONS__NOTIFY_ON_CLOSE=true
+NOTIFICATIONS__NOTIFY_ON_SCAN_DEGRADED=true
+NOTIFICATIONS__NOTIFY_ON_AUTO_SIGNAL_SUMMARY=true
+NOTIFICATIONS__NOTIFY_ON_RUNTIME_ERROR=true
+```
+
+Aktif eventler:
+- recovery bildirimi
+- pozisyon açılış/kapanış
+- scan degraded (hatalı cycle)
+- auto signal özeti
+- runtime/trade kritik hataları
 
 ## State Güvenliği / Persistence
 

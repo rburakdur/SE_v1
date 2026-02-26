@@ -156,6 +156,11 @@ def doctor() -> None:
             "error_count_last_1h": runtime.repos.errors.count_since(now - timedelta(hours=1)),
             "trade_missed_counters": missed,
             "api_connectivity": api_ok,
+            "notifications": {
+                "enabled": runtime.settings.notifications.enabled,
+                "topic": runtime.settings.notifications.topic,
+                "url": runtime.settings.notifications.ntfy_url,
+            },
             "scanner_heartbeat": runtime.repos.heartbeats.latest("scanner"),
             "trader_heartbeat": runtime.repos.heartbeats.latest("trader"),
         }

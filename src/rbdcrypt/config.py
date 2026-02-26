@@ -170,6 +170,13 @@ class NotificationSettings(BaseModel):
     topic: str | None = None
     enabled: bool = False
     timeout_sec: float = 4.0
+    notify_on_recovery: bool = True
+    notify_on_open: bool = True
+    notify_on_close: bool = True
+    notify_on_scan_degraded: bool = True
+    notify_on_auto_signal_summary: bool = True
+    notify_on_runtime_error: bool = True
+    notify_on_missed_signal: bool = False
 
 
 class AppSettings(BaseSettings):
