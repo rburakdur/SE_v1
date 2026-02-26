@@ -1,0 +1,11 @@
+[Unit]
+Description=Run RBDCrypt self-update check every minute
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=1m
+AccuracySec=15s
+Unit=rbdcrypt-update-check.service
+
+[Install]
+WantedBy=timers.target

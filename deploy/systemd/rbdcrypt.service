@@ -1,0 +1,22 @@
+[Unit]
+Description=RBDCrypt Futures Signal Engine (paper mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oracle
+Group=oracle
+WorkingDirectory=/opt/rbdcrypt
+EnvironmentFile=/opt/rbdcrypt/.env
+ExecStart=/opt/rbdcrypt/.venv/bin/rbdcrypt run
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+KillSignal=SIGINT
+
+# Resource-friendly defaults for E2 micro
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

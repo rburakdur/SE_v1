@@ -1,0 +1,16 @@
+[Unit]
+Description=RBDCrypt self-update check (git poll + deploy + restart)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=oracle
+Group=oracle
+WorkingDirectory=/opt/rbdcrypt
+Environment=REPO_DIR=/opt/rbdcrypt
+Environment=BRANCH=main
+Environment=SERVICE_NAME=rbdcrypt.service
+Environment=VENV_DIR=/opt/rbdcrypt/.venv
+Environment=USE_SUDO_FOR_RESTART=true
+ExecStart=/bin/bash /opt/rbdcrypt/scripts/check_update_and_restart.sh

@@ -22,3 +22,7 @@ bot_data/active_trades.json
 bot_data/engine_state.json
 bot_data/error_log.csv
 bot_data/paper_active_trades.json
+bot_data/*.sqlite3
+bot_data/*.sqlite3-*
+bot_data/logs/
+.pytest_cache/
