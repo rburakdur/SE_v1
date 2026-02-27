@@ -100,7 +100,8 @@ class RuntimeWorker:
         portfolio = self.runtime.repos.runtime_state.get_json("portfolio") or {}
         starting = float(self.runtime.settings.balance.starting_balance)
         balance = float(portfolio.get("balance", starting))
-        pnl_pct = ((balance - starting) / starting) * 100.0 if starting > 0 else 0.0
+        realized_pnl_quote = float(portfolio.get("realized_pnl", balance - starting))
+        pnl_pct = ((realized_pnl_quote / starting) * 100.0) if starting > 0 else 0.0
         summary = self.runtime.repos.trades.summary()
         total_trades = int(summary["total_trades"])
         wins = int(summary["wins"])
@@ -117,6 +118,7 @@ class RuntimeWorker:
         active = self.runtime.repos.positions.count_active()
         return PerformanceSnapshot(
             balance=balance,
+            realized_pnl_quote=realized_pnl_quote,
             pnl_pct_cumulative=pnl_pct,
             day_pnl_quote=day_pnl_quote,
             day_pnl_pct=day_pnl_pct,

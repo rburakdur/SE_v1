@@ -60,6 +60,7 @@ def _logger() -> logging.Logger:
 def _perf() -> PerformanceSnapshot:
     return PerformanceSnapshot(
         balance=1012.5,
+        realized_pnl_quote=12.5,
         pnl_pct_cumulative=1.25,
         day_pnl_quote=12.5,
         day_pnl_pct=1.25,
@@ -95,22 +96,22 @@ def test_notification_service_formats_and_debounces_with_persisted_state() -> No
         now_fn=lambda: clock["now"],
         state_store=state,
     )
-    clock["now"] += timedelta(minutes=21)  # 10:31 slot => heartbeat
+    clock["now"] += timedelta(minutes=21)  # 10:31 slot => summary
     service2.on_cycle_completed(performance=_perf(), open_positions=[], opened=0, closed=0, scan_errors=0)
-    clock["now"] += timedelta(minutes=30)  # 11:01 slot => heartbeat + summary
+    clock["now"] += timedelta(minutes=30)  # 11:01 slot => summary
     service2.on_cycle_completed(performance=_perf(), open_positions=[], opened=0, closed=0, scan_errors=1)
 
     headers = [str(call["message"]).splitlines()[0] for call in notifier.calls]
-    assert len(headers) == 4
-    assert headers[0].endswith("HEARTBEAT")
-    assert headers[1].endswith("HEARTBEAT")
-    assert headers[2].endswith("HEARTBEAT")
-    assert headers[3].endswith("SUMMARY")
+    assert len(headers) == 3
+    assert headers[0].endswith("SUMMARY")
+    assert headers[1].endswith("SUMMARY")
+    assert headers[2].endswith("SUMMARY")
 
     for call in notifier.calls:
         message = str(call["message"])
         assert "trade: toplam" in message
         assert "kasa:" in message
+        assert "gercek toplam pnl" in message
         assert "pozisyonlar:" in message
         assert "scanned count" not in message
 
@@ -134,14 +135,16 @@ def test_notification_service_formats_entry_message() -> None:
         pending_signals=1,
     )
     assert len(notifier.calls) == 1
+    assert notifier.calls[0]["title"] == "ENTRY BTCUSDT LONG"
     message = str(notifier.calls[0]["message"])
     assert "ENTRY" in message
-    assert "yon:" in message
+    assert "islem tipi:" in message
     assert "durum:" not in message
     assert "sure:" not in message
     assert "giris:" in message
     assert "tp:" in message
     assert "sl:" in message
+    assert "anlik pnl:" in message
     assert "arka plan: 1" in message
     assert notifier.calls[0]["attach_url"] is None
     assert notifier.calls[0]["filename"] is None
@@ -218,6 +221,36 @@ def test_notification_service_is_fail_safe() -> None:
         active_positions=0,
         scanned_count=0,
     )
+
+
+def test_notification_service_formats_exit_title_and_status() -> None:
+    now = datetime(2026, 2, 27, 11, 0, tzinfo=UTC)
+    notifier = _FakeNtfyClient()
+    service = NotificationService(notifier=notifier, logger=_logger(), now_fn=lambda: now)
+    service.on_position_close(
+        symbol="BTCUSDT",
+        side="short",
+        entry_price=60000.0,
+        exit_price=59400.0,
+        tp_price=59400.0,
+        sl_price=60300.0,
+        pnl_pct=1.0,
+        reason="tp",
+        hold_minutes=20.0,
+        active_positions=1,
+        max_positions=3,
+        pending_signals=2,
+    )
+    assert len(notifier.calls) == 1
+    call = notifier.calls[0]
+    assert call["title"] == "TP BTCUSDT +1.00%"
+    assert call["tags"] == "white_check_mark,green_circle"
+    msg = str(call["message"])
+    assert "TP" in msg
+    assert "islem tipi:" in msg
+    assert "sure:" in msg
+    assert "giris:" in msg
+    assert "cikis:" in msg
 
 
 def test_ntfy_prefixed_env_keys_are_supported(monkeypatch) -> None:

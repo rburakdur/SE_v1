@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 from logging import Logger
 from typing import Callable, Protocol
@@ -12,10 +12,9 @@ from .ntfy_client import NtfyClient
 
 STATE_KEY = "notifications_state"
 
-ENTRY_EMOJI = "\U0001F7E2"
+ENTRY_EMOJI = "\U0001F3C1"
 EXIT_EMOJI = "\U0001F534"
 SUMMARY_EMOJI = "\U0001F4CA"
-HEARTBEAT_EMOJI = "\u2764\ufe0f"
 ERROR_EMOJI = "\u26A0\ufe0f"
 UP_EMOJI = "\u2b06\ufe0f"
 DOWN_EMOJI = "\u2b07\ufe0f"
@@ -32,6 +31,7 @@ class NotificationStateStore(Protocol):
 @dataclass(slots=True)
 class PerformanceSnapshot:
     balance: float
+    realized_pnl_quote: float
     pnl_pct_cumulative: float
     day_pnl_quote: float
     day_pnl_pct: float
@@ -65,20 +65,13 @@ class NotificationService:
         logger: Logger,
         now_fn: Callable[[], datetime],
         state_store: NotificationStateStore | None = None,
-        heartbeat_interval: timedelta = timedelta(minutes=30),
-        summary_interval: timedelta = timedelta(minutes=60),
         chart_enabled: bool = False,
     ) -> None:
         self.notifier = notifier
         self.logger = logger
         self.now_fn = now_fn
         self.state_store = state_store
-        self.heartbeat_interval = heartbeat_interval
-        self.summary_interval = summary_interval
         self.chart_enabled = chart_enabled
-        self._last_heartbeat_at: datetime | None = None
-        self._last_summary_at: datetime | None = None
-        self._last_heartbeat_slot: str | None = None
         self._last_summary_slot: str | None = None
 
     def on_engine_start(
@@ -96,7 +89,15 @@ class NotificationService:
             active_positions=active_positions,
             pending_signals=0,
         )
-        self._maybe_send_heartbeat(now=now, perf=perf, open_positions=open_positions, event="startup")
+        self._maybe_send_summary(
+            now=now,
+            perf=perf,
+            open_positions=open_positions,
+            opened=0,
+            closed=0,
+            scan_errors=0,
+            source="startup",
+        )
 
     def on_cycle_completed(
         self,
@@ -116,23 +117,14 @@ class NotificationService:
             active_positions=active_positions,
             pending_signals=0,
         )
-        self._maybe_send_heartbeat(now=now, perf=perf, open_positions=open_positions, event="runtime loop")
-        if not self._should_send_summary(now):
-            return
-        lines = [
-            f"{SUMMARY_EMOJI} SUMMARY",
-            *self._perf_lines_dashboard(perf),
-            (
-                f"bu saat: acilan {int(opened)} | kapanan {int(closed)} | "
-                f"hata {int(scan_errors)} | bekleyen {max(0, int(perf.pending_signals))}"
-            ),
-        ]
-        lines.extend(self._position_lines_compact(open_positions))
-        self._send(
-            title="SUMMARY",
-            message="\n".join(lines),
-            priority=2,
-            tags="bar_chart",
+        self._maybe_send_summary(
+            now=now,
+            perf=perf,
+            open_positions=open_positions,
+            opened=opened,
+            closed=closed,
+            scan_errors=scan_errors,
+            source="runtime loop",
         )
 
     def on_position_open(
@@ -155,15 +147,16 @@ class NotificationService:
         scanned_count: int = 0,
     ) -> None:
         direction = self._direction_text(side)
+        clean_symbol = self._clean_symbol(symbol)
+        side_text = self._side_text(side)
         lines = [
             f"{ENTRY_EMOJI} ENTRY",
-            f"sembol: {self._clean_symbol(symbol)}",
-            f"yon: {direction}",
-            (
-                f"giris: {self._fmt_price(entry_price)} | "
-                f"tp: {self._fmt_price(tp_price)} ({self._fmt_pct(tp_target_pct)}) | "
-                f"sl: {self._fmt_price(sl_price)} ({self._fmt_pct(sl_risk_pct)})"
-            ),
+            f"sembol: {clean_symbol}",
+            f"islem tipi: {direction}",
+            f"tp: {self._fmt_price(tp_price)} ({self._fmt_pct(tp_target_pct)})",
+            f"sl: {self._fmt_price(sl_price)} ({self._fmt_pct(sl_risk_pct)})",
+            f"giris: {self._fmt_price(entry_price)}",
+            f"anlik pnl: {self._fmt_pct(current_pnl_pct)}",
             (
                 f"pozisyonlar: {max(0, int(active_positions))}/{max(0, int(max_positions))} | "
                 f"arka plan: {max(0, int(pending_signals))}"
@@ -178,12 +171,14 @@ class NotificationService:
             tp_price=tp_price,
             sl_price=sl_price,
             exit_price=None,
+            hold_minutes=hold_minutes,
+            exit_reason=None,
         )
         self._send(
-            title=f"ENTRY {self._clean_symbol(symbol)}",
+            title=f"ENTRY {clean_symbol} {side_text}",
             message="\n".join(lines),
             priority=4,
-            tags="green_circle,chart_with_upwards_trend",
+            tags="checkered_flag,green_circle",
             attach_url=attachment[0] if attachment else None,
             filename=attachment[1] if attachment else None,
         )
@@ -208,16 +203,20 @@ class NotificationService:
     ) -> None:
         direction = self._direction_text(side)
         pnl = float(pnl_pct or 0.0)
-        status = self._status_text(pnl)
-        reason_text = reason.strip() if isinstance(reason, str) and reason.strip() else "-"
+        clean_symbol = self._clean_symbol(symbol)
+        reason_code = self._reason_code(reason)
+        reason_label = self._reason_label(reason_code)
+        reason_emoji = self._reason_emoji(reason_code)
+        reason_text = reason.strip().upper() if isinstance(reason, str) and reason.strip() else "-"
         lines = [
-            f"{EXIT_EMOJI} EXIT",
-            f"sembol: {self._clean_symbol(symbol)}",
-            f"yon: {direction}",
-            f"durum: {status}",
+            f"{reason_emoji} {reason_label}",
+            f"sembol: {clean_symbol}",
+            f"islem tipi: {direction}",
+            f"sure: {max(0.0, float(hold_minutes)):.1f} dk",
+            f"giris: {self._fmt_price(entry_price)}",
+            f"cikis: {self._fmt_price(exit_price)}",
+            f"pnl: {self._fmt_pct(pnl)}",
             f"neden: {reason_text}",
-            f"pnl%: {self._fmt_pct(pnl)} | sure: {max(0.0, float(hold_minutes)):.1f} dk",
-            f"giris: {self._fmt_price(entry_price)} | cikis: {self._fmt_price(exit_price)}",
             (
                 f"pozisyonlar: {max(0, int(active_positions))}/{max(0, int(max_positions))} | "
                 f"arka plan: {max(0, int(pending_signals))}"
@@ -232,12 +231,14 @@ class NotificationService:
             tp_price=tp_price,
             sl_price=sl_price,
             exit_price=exit_price,
+            hold_minutes=hold_minutes,
+            exit_reason=reason,
         )
         self._send(
-            title=f"EXIT {self._clean_symbol(symbol)}",
+            title=f"{reason_label} {clean_symbol} {self._fmt_pct(pnl)}",
             message="\n".join(lines),
             priority=4,
-            tags="red_circle,x",
+            tags=self._exit_tags(reason_code=reason_code, pnl_pct=pnl),
             attach_url=attachment[0] if attachment else None,
             filename=attachment[1] if attachment else None,
         )
@@ -258,6 +259,7 @@ class NotificationService:
             f"sembol: {self._clean_symbol(symbol)}",
             f"pnl%: {self._fmt_pct(pnl_pct)}",
             f"aktif pozisyon: {max(0, int(active_positions))}",
+            f"taranan: {max(0, int(scanned_count))}",
             f"kaynak: {source} | {error_type}: {error}",
         ]
         self._send(
@@ -267,27 +269,33 @@ class NotificationService:
             tags="rotating_light",
         )
 
-    def _maybe_send_heartbeat(
+    def _maybe_send_summary(
         self,
         *,
         now: datetime,
         perf: PerformanceSnapshot,
         open_positions: list[OpenPositionSnapshot] | None,
-        event: str,
+        opened: int,
+        closed: int,
+        scan_errors: int,
+        source: str,
     ) -> None:
-        if not self._should_send_heartbeat(now):
+        if not self._should_send_summary(now):
             return
         lines = [
-            f"{HEARTBEAT_EMOJI} HEARTBEAT",
+            f"{SUMMARY_EMOJI} SUMMARY",
             *self._perf_lines_dashboard(perf),
-            f"event: {event}",
+            (
+                f"donem: acilan {int(opened)} | kapanan {int(closed)} | "
+                f"hata {int(scan_errors)} | kaynak {source}"
+            ),
         ]
         lines.extend(self._position_lines_compact(open_positions))
         self._send(
-            title="HEARTBEAT",
+            title="SUMMARY",
             message="\n".join(lines),
-            priority=3,
-            tags="heart,bar_chart",
+            priority=2,
+            tags="bar_chart",
         )
 
     def _perf_lines_dashboard(self, perf: PerformanceSnapshot) -> list[str]:
@@ -296,8 +304,11 @@ class NotificationService:
                 f"trade: toplam {perf.total_trades} | kazanc {perf.wins} | "
                 f"kayip {perf.losses} | winrate {perf.win_rate_pct:.1f}%"
             ),
-            f"kasa: {perf.balance:.2f} | toplam pnl {self._fmt_pct(perf.pnl_pct_cumulative)}",
-            f"gunluk pnl: {perf.day_pnl_quote:+.2f} ({self._fmt_pct(perf.day_pnl_pct)})",
+            (
+                f"kasa: {perf.balance:.2f} | gercek toplam pnl {perf.realized_pnl_quote:+.2f} "
+                f"({self._fmt_pct(perf.pnl_pct_cumulative)})"
+            ),
+            f"gunluk gercek pnl: {perf.day_pnl_quote:+.2f} ({self._fmt_pct(perf.day_pnl_pct)})",
             (
                 f"pozisyonlar: {max(0, int(perf.active_positions))}/{max(0, int(perf.max_positions))} | "
                 f"arka plan: {max(0, int(perf.pending_signals))}"
@@ -324,45 +335,11 @@ class NotificationService:
             lines.append(f"+{extra} pozisyon daha var")
         return lines
 
-    def _should_send_heartbeat(self, now: datetime) -> bool:
-        # 01 and 31 minute slots each hour.
+    def _should_send_summary(self, now: datetime) -> bool:
+        # Summary slots: minute 01 and 31 each hour.
         if now.minute not in {1, 31}:
             return False
-        return self._should_send_slot(name="last_heartbeat_slot", slot=now.strftime("%Y-%m-%dT%H:%M"))
-
-    def _should_send_summary(self, now: datetime) -> bool:
-        # Hourly summary on minute 01.
-        if now.minute != 1:
-            return False
-        return self._should_send_slot(name="last_summary_slot", slot=now.strftime("%Y-%m-%dT%H"))
-
-    def _should_send(self, *, name: str, now: datetime, interval: timedelta) -> bool:
-        cached = self._last_heartbeat_at if name == "last_heartbeat_at" else self._last_summary_at
-        if cached is None:
-            cached = self._load_state_time(name)
-        if cached is not None and (now - cached) < interval:
-            return False
-        if name == "last_heartbeat_at":
-            self._last_heartbeat_at = now
-        else:
-            self._last_summary_at = now
-        self._save_state_time(name, now)
-        return True
-
-    def _load_state_time(self, name: str) -> datetime | None:
-        if self.state_store is None:
-            return None
-        try:
-            state = self.state_store.get_json(STATE_KEY) or {}
-        except Exception:
-            return None
-        raw = state.get(name)
-        if not isinstance(raw, str) or not raw:
-            return None
-        try:
-            return datetime.fromisoformat(raw)
-        except ValueError:
-            return None
+        return self._should_send_slot(name="last_summary_slot", slot=now.strftime("%Y-%m-%dT%H:%M"))
 
     def _load_state_value(self, name: str) -> str | None:
         if self.state_store is None:
@@ -390,30 +367,14 @@ class NotificationService:
             )
 
     def _should_send_slot(self, *, name: str, slot: str) -> bool:
-        cached = self._last_heartbeat_slot if name == "last_heartbeat_slot" else self._last_summary_slot
+        cached = self._last_summary_slot
         if cached is None:
             cached = self._load_state_value(name)
         if cached == slot:
             return False
-        if name == "last_heartbeat_slot":
-            self._last_heartbeat_slot = slot
-        else:
-            self._last_summary_slot = slot
+        self._last_summary_slot = slot
         self._save_state_value(name, slot)
         return True
-
-    def _save_state_time(self, name: str, value: datetime) -> None:
-        if self.state_store is None:
-            return
-        try:
-            state = self.state_store.get_json(STATE_KEY) or {}
-            state[name] = value.isoformat()
-            self.state_store.set_json(STATE_KEY, state)
-        except Exception as exc:
-            self.logger.error(
-                "ntfy_state_error",
-                extra={"event": {"source": "notification_service", "key": name, "msg": str(exc)}},
-            )
 
     def _send(
         self,
@@ -453,6 +414,8 @@ class NotificationService:
         tp_price: float | None,
         sl_price: float | None,
         exit_price: float | None,
+        hold_minutes: float,
+        exit_reason: str | None,
     ) -> tuple[str, str] | None:
         if not self.chart_enabled or not chart_points:
             return None
@@ -464,7 +427,7 @@ class NotificationService:
         side_norm = side.strip().lower() if side else "-"
         up = side_norm in {"long", "buy"}
         price_color = "#1d4ed8"
-        entry_color = "#f59e0b"
+        entry_color = "#06b6d4"
         tp_color = "#15803d"
         sl_color = "#b91c1c"
         exit_color = "#0f766e"
@@ -480,15 +443,18 @@ class NotificationService:
                 "tension": 0.2,
             }
         ]
+        entry_idx = len(series) - 1 if event == "entry" else self._estimate_entry_index(len(series), hold_minutes)
         if entry_price is not None:
             datasets.append(self._constant_line("entry", entry_price, len(series), entry_color))
             datasets.append(
                 self._point_marker(
-                    "entry_point",
+                    None,
                     series,
                     entry_price,
                     entry_color,
-                    index=len(series) - 1,
+                    index=entry_idx,
+                    point_style="circle",
+                    radius=6,
                 )
             )
         if tp_price is not None:
@@ -497,15 +463,35 @@ class NotificationService:
             datasets.append(self._constant_line("sl", sl_price, len(series), sl_color))
         if exit_price is not None:
             datasets.append(self._constant_line("exit", exit_price, len(series), exit_color))
+            exit_idx = len(series) - 1
             datasets.append(
                 self._point_marker(
-                    "exit_point",
+                    None,
                     series,
                     exit_price,
                     exit_color,
-                    index=len(series) - 1,
+                    index=exit_idx,
+                    point_style="rectRot",
+                    radius=6,
                 )
             )
+            reason_code = self._reason_code(exit_reason)
+            if reason_code in {"tp", "sl"}:
+                hit_price = tp_price if reason_code == "tp" else sl_price
+                if hit_price is None:
+                    hit_price = exit_price
+                hit_color = tp_color if reason_code == "tp" else sl_color
+                datasets.append(
+                    self._point_marker(
+                        None,
+                        series,
+                        hit_price,
+                        hit_color,
+                        index=exit_idx,
+                        point_style="crossRot",
+                        radius=8,
+                    )
+                )
 
         side_text = "LONG" if up else "SHORT" if side_norm in {"short", "sell"} else "-"
         subtitle_parts = [f"YON: {side_text}"]
@@ -517,7 +503,16 @@ class NotificationService:
         if sl_price is not None and entry_price and entry_price > 0:
             sl_pct = abs(((entry_price - sl_price) / entry_price) * 100.0)
             subtitle_parts.append(f"SL {self._fmt_price(sl_price)} ({sl_pct:.2f}%)")
+        if exit_price is not None:
+            subtitle_parts.append(f"CIKIS {self._fmt_price(exit_price)}")
         subtitle = " | ".join(subtitle_parts)
+        y_min, y_max = self._y_bounds(
+            series=series,
+            entry_price=entry_price,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            exit_price=exit_price,
+        )
 
         cfg = {
             "type": "line",
@@ -528,15 +523,15 @@ class NotificationService:
             "options": {
                 "animation": False,
                 "plugins": {
-                    "legend": {"display": True, "position": "bottom"},
+                    "legend": {"display": False},
                     "title": {
                         "display": True,
-                        "text": [f"{self._clean_symbol(symbol)} {event.upper()}", subtitle],
+                        "text": [f"{self._clean_symbol(symbol)} {event.upper()} {side_text}", subtitle],
                     },
                 },
                 "scales": {
                     "x": {"display": False},
-                    "y": {"display": True},
+                    "y": {"display": True, "min": y_min, "max": y_max},
                 },
             },
         }
@@ -563,12 +558,14 @@ class NotificationService:
 
     @staticmethod
     def _point_marker(
-        label: str,
+        label: str | None,
         series: list[float],
         value: float,
         color: str,
         *,
         index: int | None = None,
+        point_style: str = "circle",
+        radius: int = 6,
     ) -> dict[str, object]:
         if index is not None and 0 <= int(index) < len(series):
             nearest_idx = int(index)
@@ -577,22 +574,57 @@ class NotificationService:
             nearest_idx = max(range(len(series)), key=lambda i: (-abs(series[i] - value), i))
         points = [None] * len(series)
         points[nearest_idx] = round(float(value), 6)
-        return {
-            "label": label,
+        marker = {
             "data": points,
             "showLine": False,
-            "pointRadius": 6,
-            "pointHoverRadius": 6,
+            "pointRadius": int(radius),
+            "pointHoverRadius": int(radius),
             "pointBackgroundColor": color,
             "pointBorderColor": "#111827",
             "pointBorderWidth": 1,
+            "pointStyle": point_style,
         }
+        if isinstance(label, str) and label.strip():
+            marker["label"] = label
+        return marker
+
+    @staticmethod
+    def _estimate_entry_index(series_len: int, hold_minutes: float) -> int:
+        if series_len <= 1:
+            return 0
+        bars_back = int(round(max(0.0, float(hold_minutes)) / 5.0))
+        return max(0, series_len - 1 - bars_back)
+
+    @staticmethod
+    def _y_bounds(
+        *,
+        series: list[float],
+        entry_price: float | None,
+        tp_price: float | None,
+        sl_price: float | None,
+        exit_price: float | None,
+    ) -> tuple[float, float]:
+        values = list(series)
+        for level in (entry_price, tp_price, sl_price, exit_price):
+            if level is None:
+                continue
+            values.append(float(level))
+        y_min = min(values)
+        y_max = max(values)
+        span = max(y_max - y_min, y_max * 0.002, 1e-9)
+        pad = span * 0.2
+        lower = y_min - pad
+        upper = y_max + pad
+        if lower <= 0:
+            lower = y_min * 0.98
+        return round(lower, 6), round(upper, 6)
 
     @staticmethod
     def _legacy_perf(*, pnl_pct: float | None, active_positions: int, pending_signals: int) -> PerformanceSnapshot:
         pct = float(pnl_pct or 0.0)
         return PerformanceSnapshot(
             balance=0.0,
+            realized_pnl_quote=0.0,
             pnl_pct_cumulative=pct,
             day_pnl_quote=0.0,
             day_pnl_pct=0.0,
@@ -613,6 +645,50 @@ class NotificationService:
         if side_norm in {"short", "sell"}:
             return f"{DOWN_EMOJI} SHORT"
         return "-"
+
+    @staticmethod
+    def _side_text(side: str) -> str:
+        side_norm = side.strip().lower() if side else "-"
+        if side_norm in {"long", "buy"}:
+            return "LONG"
+        if side_norm in {"short", "sell"}:
+            return "SHORT"
+        return "-"
+
+    @staticmethod
+    def _reason_code(reason: str | None) -> str:
+        if reason is None:
+            return "exit"
+        normalized = reason.strip().lower()
+        if normalized == "tp":
+            return "tp"
+        if normalized == "sl":
+            return "sl"
+        return "exit"
+
+    @staticmethod
+    def _reason_label(reason_code: str) -> str:
+        if reason_code == "tp":
+            return "TP"
+        if reason_code == "sl":
+            return "SL"
+        return "EXIT"
+
+    @staticmethod
+    def _reason_emoji(reason_code: str) -> str:
+        if reason_code == "tp":
+            return PROFIT_EMOJI
+        if reason_code == "sl":
+            return LOSS_EMOJI
+        return EXIT_EMOJI
+
+    @staticmethod
+    def _exit_tags(*, reason_code: str, pnl_pct: float) -> str:
+        if reason_code == "tp":
+            return "white_check_mark,green_circle"
+        if reason_code == "sl":
+            return "x,red_circle"
+        return "green_circle" if pnl_pct >= 0 else "red_circle"
 
     @staticmethod
     def _status_text(pnl_pct: float | None) -> str:
