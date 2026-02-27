@@ -172,6 +172,14 @@ class NotificationSettings(BaseModel):
     ntfy_url: str | None = None
     topic: str | None = Field(default=None, validation_alias=AliasChoices("topic", "ntfy_topic"))
     enabled: bool = Field(default=False, validation_alias=AliasChoices("enabled", "ntfy_enabled"))
+    command_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("command_enabled", "ntfy_command_enabled"),
+    )
+    command_topic: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("command_topic", "ntfy_command_topic"),
+    )
     timeout_sec: float = 4.0
     detail_level: Literal["compact", "detailed"] = "detailed"
     auto_signal_top_n: int = 5

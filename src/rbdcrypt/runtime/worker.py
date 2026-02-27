@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import shutil
+import tarfile
 import time
 import traceback
 from dataclasses import dataclass
 from datetime import UTC
+from pathlib import Path
 
 from ..core.scheduler import IntervalScheduler
 from ..models.error_event import ErrorEvent
@@ -65,6 +68,9 @@ class RuntimeWorker:
                     opened=trade_result.opened,
                     closed=trade_result.closed,
                     scan_errors=scan_result.error_count,
+                )
+                self.runtime.notification_service.process_ntfy_commands(
+                    export_logs_bundle=self._export_logs_bundle,
                 )
                 return
             except Exception as exc:
@@ -152,6 +158,41 @@ class RuntimeWorker:
             )
         snapshots.sort(key=lambda p: p.hold_minutes, reverse=True)
         return snapshots
+
+    def _export_logs_bundle(self) -> Path:
+        now = self.runtime.clock.now().astimezone(UTC)
+        ts = now.strftime("%Y%m%d_%H%M%S")
+        export_root = self.runtime.settings.data_dir / "exports"
+        export_dir = export_root / f"ntfy_analysis_{ts}"
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        tables = [
+            "signals",
+            "signal_decisions",
+            "market_context",
+            "positions_active",
+            "trades_closed",
+            "errors",
+            "heartbeats",
+            "runtime_state",
+        ]
+        for table in tables:
+            self.runtime.repos.maintenance.export_csv(
+                table=table,
+                out_path=export_dir / f"{table}.csv",
+            )
+
+        log_path = self.runtime.settings.logging.log_path
+        if log_path.is_file():
+            shutil.copy2(log_path, export_dir / log_path.name)
+        db_path = self.runtime.settings.storage.db_path
+        if db_path.is_file():
+            shutil.copy2(db_path, export_dir / db_path.name)
+
+        archive_path = export_root / f"ntfy_analysis_{ts}.tar.gz"
+        with tarfile.open(archive_path, mode="w:gz") as tf:
+            tf.add(export_dir, arcname=export_dir.name)
+        return archive_path
 
     @staticmethod
     def _tp_sl_targets_pct(entry: float, tp: float, sl: float, side: str) -> tuple[float, float]:

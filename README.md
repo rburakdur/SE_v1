@@ -153,6 +153,8 @@ Tüm threshold ve davranışlar config üzerindedir; magic number bırakmamaya o
 NOTIFICATIONS__NTFY_ENABLED=true
 NOTIFICATIONS__NTFY_URL=https://ntfy.sh
 NOTIFICATIONS__NTFY_TOPIC=<senin_topic_adin>
+NOTIFICATIONS__NTFY_COMMAND_ENABLED=true
+NOTIFICATIONS__NTFY_COMMAND_TOPIC=<senin_topic_adin>-cmd
 NOTIFICATIONS__NOTIFY_ON_OPEN=true
 NOTIFICATIONS__NOTIFY_ON_CLOSE=true
 NOTIFICATIONS__NOTIFY_ON_SCAN_DEGRADED=true
@@ -166,6 +168,10 @@ Aktif eventler:
 - scan degraded (hatalı cycle)
 - auto signal özeti
 - runtime/trade kritik hataları
+
+Ntfy komut modu:
+- `NOTIFICATIONS__NTFY_COMMAND_ENABLED=true` ise bot `<topic>-cmd` kanalını dinler.
+- `logs` mesajı gönderildiğinde bot CSV + log + sqlite export paketini üretip ana topic'e dosya olarak geri yollar.
 
 ## State Güvenliği / Persistence
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from rbdcrypt.config import AppSettings
 from rbdcrypt.notifications.notification_service import NotificationService, PerformanceSnapshot
@@ -11,6 +12,17 @@ class _FakeNtfyClient:
     def __init__(self, *, should_fail: bool = False) -> None:
         self.should_fail = should_fail
         self.calls: list[dict[str, object]] = []
+        self.upload_calls: list[dict[str, object]] = []
+        self.command_messages: list[dict[str, object]] = []
+        self.config = type(
+            "Cfg",
+            (),
+            {
+                "command_enabled": True,
+                "command_topic": "RBD-CRYPT-cmd",
+                "topic": "RBD-CRYPT",
+            },
+        )()
 
     def notify(
         self,
@@ -31,6 +43,34 @@ class _FakeNtfyClient:
                 "priority": priority,
                 "tags": tags,
                 "attach_url": attach_url,
+                "filename": filename,
+            }
+        )
+        return True
+
+    def fetch_messages(self, *, topic: str, since: str | None = None) -> list[dict[str, object]]:
+        _ = (topic, since)
+        return list(self.command_messages)
+
+    def upload_file(
+        self,
+        *,
+        title: str,
+        file_path: Path,
+        topic: str | None = None,
+        message: str | None = None,
+        priority: int | None = None,
+        tags: str | None = None,
+        filename: str | None = None,
+    ) -> bool:
+        self.upload_calls.append(
+            {
+                "title": title,
+                "file_path": str(file_path),
+                "topic": topic,
+                "message": message,
+                "priority": priority,
+                "tags": tags,
                 "filename": filename,
             }
         )
@@ -136,7 +176,7 @@ def test_notification_service_formats_entry_message() -> None:
     )
     assert len(notifier.calls) == 1
     assert notifier.calls[0]["title"] == "ENTRY BTCUSDT LONG"
-    assert notifier.calls[0]["tags"] == "white_check_mark"
+    assert notifier.calls[0]["tags"] == "chart_with_upwards_trend"
     message = str(notifier.calls[0]["message"])
     assert "ENTRY" not in message
     assert "islem tipi:" not in message
@@ -253,6 +293,31 @@ def test_notification_service_formats_exit_title_and_status() -> None:
     assert "sure:" in msg
     assert "giris:" in msg
     assert "cikis:" in msg
+
+
+def test_notification_service_handles_logs_command_and_uploads_bundle(tmp_path) -> None:
+    now = datetime(2026, 2, 27, 11, 31, tzinfo=UTC)
+    notifier = _FakeNtfyClient()
+    notifier.command_messages = [{"id": "abc123", "message": "logs"}]
+    state = _FakeStateStore()
+    service = NotificationService(
+        notifier=notifier,
+        logger=_logger(),
+        now_fn=lambda: now,
+        state_store=state,
+    )
+    archive = tmp_path / "ntfy_analysis_test.tar.gz"
+    archive.write_bytes(b"test")
+
+    service.process_ntfy_commands(export_logs_bundle=lambda: archive)
+
+    assert len(notifier.upload_calls) == 1
+    call = notifier.upload_calls[0]
+    assert call["title"] == "LOGS ARCHIVE"
+    assert call["tags"] == "file_folder"
+    assert call["file_path"].endswith("ntfy_analysis_test.tar.gz")
+    saved = state.get_json("notifications_state") or {}
+    assert saved.get("last_command_id") == "abc123"
 
 
 def test_ntfy_prefixed_env_keys_are_supported(monkeypatch) -> None:

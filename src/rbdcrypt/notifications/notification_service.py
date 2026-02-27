@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 from logging import Logger
+from pathlib import Path
 from typing import Callable, Protocol
 from urllib.parse import quote
 
@@ -11,6 +12,7 @@ from .ntfy_client import NtfyClient
 
 
 STATE_KEY = "notifications_state"
+CMD_LAST_ID_KEY = "last_command_id"
 
 SUMMARY_EMOJI = "\U0001F4CA"
 ERROR_EMOJI = "\u26A0\ufe0f"
@@ -172,7 +174,7 @@ class NotificationService:
             title=f"ENTRY {clean_symbol} {side_text}",
             message="\n".join(lines),
             priority=4,
-            tags="white_check_mark",
+            tags="chart_with_upwards_trend",
             attach_url=attachment[0] if attachment else None,
             filename=attachment[1] if attachment else None,
         )
@@ -259,6 +261,56 @@ class NotificationService:
             priority=5,
             tags="rotating_light",
         )
+
+    def process_ntfy_commands(self, *, export_logs_bundle: Callable[[], Path]) -> None:
+        if self.notifier is None:
+            return
+        cfg = self.notifier.config
+        if not cfg.command_enabled:
+            return
+        if cfg.command_topic:
+            command_topic = cfg.command_topic.strip()
+        elif cfg.topic:
+            command_topic = f"{cfg.topic}-cmd"
+        else:
+            command_topic = ""
+        if not command_topic:
+            return
+        since = self._load_state_value(CMD_LAST_ID_KEY)
+        try:
+            messages = self.notifier.fetch_messages(topic=command_topic, since=since)
+        except Exception as exc:
+            self.logger.error(
+                "ntfy_error",
+                extra={"event": {"source": "notification_service", "title": "CMD_FETCH", "msg": str(exc)}},
+            )
+            return
+        if not messages:
+            return
+        last_id = since
+        for msg in messages:
+            msg_id = str(msg.get("id") or "").strip()
+            if msg_id:
+                last_id = msg_id
+            command = str(msg.get("message") or "").strip().lower()
+            if command != "logs":
+                continue
+            archive_path = export_logs_bundle()
+            try:
+                self.notifier.upload_file(
+                    title="LOGS ARCHIVE",
+                    file_path=archive_path,
+                    message=f"komut: logs | dosya: {archive_path.name}",
+                    priority=3,
+                    tags="file_folder",
+                )
+            except Exception as exc:
+                self.logger.error(
+                    "ntfy_error",
+                    extra={"event": {"source": "notification_service", "title": "CMD_UPLOAD", "msg": str(exc)}},
+                )
+        if last_id and last_id != since:
+            self._save_state_value(CMD_LAST_ID_KEY, last_id)
 
     def _maybe_send_summary(
         self,
@@ -413,7 +465,7 @@ class NotificationService:
         cleaned = [float(v) for v in chart_points if float(v) > 0]
         if len(cleaned) < 8:
             return None
-        series = cleaned[-16:]
+        series = cleaned[-25:]
         labels = list(range(1, len(series) + 1))
         side_norm = side.strip().lower() if side else "-"
         up = side_norm in {"long", "buy"}
