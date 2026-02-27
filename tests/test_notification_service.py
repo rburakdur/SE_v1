@@ -19,6 +19,8 @@ class _FakeNtfyClient:
         *,
         priority: int | None = None,
         tags: str | None = None,
+        attach_url: str | None = None,
+        filename: str | None = None,
     ) -> bool:
         if self.should_fail:
             raise RuntimeError("ntfy down")
@@ -28,6 +30,8 @@ class _FakeNtfyClient:
                 "message": message,
                 "priority": priority,
                 "tags": tags,
+                "attach_url": attach_url,
+                "filename": filename,
             }
         )
         return True
@@ -141,6 +145,59 @@ def test_notification_service_formats_entry_message() -> None:
     assert "tp:" in message
     assert "sl:" in message
     assert "arka plan: 1" in message
+    assert notifier.calls[0]["attach_url"] is None
+    assert notifier.calls[0]["filename"] is None
+
+
+def test_notification_service_attaches_png_chart_only_for_entry_exit() -> None:
+    now = datetime(2026, 2, 27, 10, 0, tzinfo=UTC)
+    notifier = _FakeNtfyClient()
+    service = NotificationService(
+        notifier=notifier,
+        logger=_logger(),
+        now_fn=lambda: now,
+        chart_enabled=True,
+    )
+    chart_points = [60000.0 + i * 10 for i in range(64)]
+
+    service.on_engine_start(performance=_perf(), open_positions=[])
+    service.on_position_open(
+        symbol="BTCUSDT",
+        side="long",
+        entry_price=60100.0,
+        tp_price=60700.0,
+        sl_price=59850.0,
+        tp_target_pct=1.0,
+        sl_risk_pct=0.4,
+        active_positions=1,
+        max_positions=3,
+        pending_signals=0,
+        chart_points=chart_points,
+    )
+    service.on_position_close(
+        symbol="BTCUSDT",
+        side="long",
+        entry_price=60100.0,
+        exit_price=60420.0,
+        pnl_pct=0.53,
+        reason="TP",
+        hold_minutes=35.0,
+        active_positions=0,
+        max_positions=3,
+        pending_signals=0,
+        chart_points=chart_points,
+    )
+
+    heartbeat_call = notifier.calls[0]
+    entry_call = notifier.calls[1]
+    exit_call = notifier.calls[2]
+    assert heartbeat_call["attach_url"] is None
+    assert entry_call["attach_url"] is not None
+    assert str(entry_call["attach_url"]).startswith("https://quickchart.io/chart?format=png")
+    assert entry_call["filename"] == "btcusdt-entry.png"
+    assert exit_call["attach_url"] is not None
+    assert str(exit_call["attach_url"]).startswith("https://quickchart.io/chart?format=png")
+    assert exit_call["filename"] == "btcusdt-exit.png"
 
 
 def test_notification_service_is_fail_safe() -> None:

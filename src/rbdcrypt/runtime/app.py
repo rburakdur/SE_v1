@@ -74,6 +74,7 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
         logger=logger,
         now_fn=clock.now,
         state_store=repos.runtime_state,
+        chart_enabled=bool(settings.runtime.chart_enabled),
     )
 
     scan_service = ScanService(

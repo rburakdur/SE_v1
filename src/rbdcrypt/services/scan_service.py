@@ -25,6 +25,7 @@ class ScanRunResult:
     btc_context: MarketContext | None
     signals: list[SignalEvent] = field(default_factory=list)
     prices_by_symbol: dict[str, float] = field(default_factory=dict)
+    chart_points_by_symbol: dict[str, list[float]] = field(default_factory=dict)
     symbol_states: dict[str, SymbolBarState] = field(default_factory=dict)
     scanned_symbols: int = 0
     error_count: int = 0
@@ -62,6 +63,7 @@ class ScanService:
         btc_ctx: MarketContext | None = None
         signals: list[SignalEvent] = []
         prices: dict[str, float] = {}
+        chart_points_by_symbol: dict[str, list[float]] = {}
         symbol_states: dict[str, SymbolBarState] = {}
         error_count = 0
         error_samples: list[str] = []
@@ -90,6 +92,7 @@ class ScanService:
                 signals=[],
                 prices_by_symbol={},
                 symbol_states=symbol_states,
+                chart_points_by_symbol=chart_points_by_symbol,
                 scanned_symbols=0,
                 error_count=error_count,
             )
@@ -121,6 +124,7 @@ class ScanService:
                 self.repos.signals.insert_decisions(signal_id, decisions)
                 signals.append(signal)
                 prices[symbol] = signal.price
+                chart_points_by_symbol[symbol] = [float(v) for v in candles.closes[-60:]]
 
                 if self.settings.runtime.heavy_debug:
                     self.logger.info(
@@ -172,7 +176,11 @@ class ScanService:
                 priority=4,
                 tags="warning",
             )
-        if self.settings.notifications.notify_on_auto_signal_summary and payload["auto_signals"] > 0:
+        if (
+            self.settings.notifications.notify_on_auto_signal_summary
+            and self.notification_service is None
+            and payload["auto_signals"] > 0
+        ):
             top_n = max(1, int(self.settings.notifications.auto_signal_top_n))
             top = sorted((s for s in signals if s.auto_pass), key=lambda x: x.power_score, reverse=True)[:top_n]
             lines = [self._format_auto_signal_line(i + 1, s) for i, s in enumerate(top)]
@@ -190,6 +198,7 @@ class ScanService:
             btc_context=btc_ctx,
             signals=signals,
             prices_by_symbol=prices,
+            chart_points_by_symbol=chart_points_by_symbol,
             symbol_states=symbol_states,
             scanned_symbols=len(signals),
             error_count=error_count,

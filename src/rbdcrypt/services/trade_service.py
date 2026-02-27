@@ -135,19 +135,21 @@ class TradeService:
         *,
         signals: list[SignalEvent],
         prices_by_symbol: dict[str, float],
+        chart_points_by_symbol: dict[str, list[float]] | None = None,
         symbol_states: dict[str, SymbolBarState] | None = None,
         scanned_count: int | None = None,
     ) -> TradeCycleResult:
         result = TradeCycleResult()
         now = self.now_fn()
         symbol_states = symbol_states or {}
+        chart_points_by_symbol = chart_points_by_symbol or {}
         default_scanned = len(signals)
         resolved_scanned = scanned_count if scanned_count is not None else default_scanned
         self._cycle_scanned_count = max(0, int(resolved_scanned))
         self._reset_hourly_missed_if_needed(now)
         self._refresh_cache()
-        self._manage_exits(now, prices_by_symbol, symbol_states, result)
-        self._open_new_positions(now, signals, result)
+        self._manage_exits(now, prices_by_symbol, chart_points_by_symbol, symbol_states, result)
+        self._open_new_positions(now, signals, chart_points_by_symbol, result)
         self._persist_portfolio(now)
         self._persist_cooldowns(now)
         self._persist_missed_counters(
@@ -177,6 +179,7 @@ class TradeService:
         self,
         now: datetime,
         prices_by_symbol: dict[str, float],
+        chart_points_by_symbol: dict[str, list[float]],
         symbol_states: dict[str, SymbolBarState],
         result: TradeCycleResult,
     ) -> None:
@@ -244,11 +247,14 @@ class TradeService:
                             side=trade.side.value,
                             entry_price=trade.entry_price,
                             exit_price=trade.exit_price,
+                            tp_price=trade.current_tp,
+                            sl_price=trade.current_sl,
                             pnl_pct=trade.pnl_pct * 100.0,
                             hold_minutes=hold_min,
                             active_positions=len(self._active_cache),
                             max_positions=int(self.settings.risk.max_active_positions),
                             pending_signals=result.max_pos_blocked,
+                            chart_points=chart_points_by_symbol.get(trade.symbol) if self.settings.runtime.chart_enabled else None,
                             reason=trade.exit_reason,
                         )
                     else:
@@ -281,7 +287,13 @@ class TradeService:
         # Runtime v1 hint: use sign of current pnl as a cheap proxy until full trend-state integration.
         return position.current_pnl_pct < -0.001 and position.best_pnl_pct > 0.003
 
-    def _open_new_positions(self, now: datetime, signals: list[SignalEvent], result: TradeCycleResult) -> None:
+    def _open_new_positions(
+        self,
+        now: datetime,
+        signals: list[SignalEvent],
+        chart_points_by_symbol: dict[str, list[float]],
+        result: TradeCycleResult,
+    ) -> None:
         existing_symbols = {p.symbol for p in self._active_cache.values()}
         candidates = [s for s in signals if s.auto_pass and s.direction.value != "flat"]
         candidates.sort(key=lambda s: s.power_score, reverse=True)
@@ -403,6 +415,9 @@ class TradeService:
                             active_positions=len(self._active_cache),
                             max_positions=int(self.settings.risk.max_active_positions),
                             pending_signals=result.max_pos_blocked,
+                            chart_points=chart_points_by_symbol.get(position.symbol)
+                            if self.settings.runtime.chart_enabled
+                            else None,
                         )
                     else:
                         detail = self.settings.notifications.detail_level

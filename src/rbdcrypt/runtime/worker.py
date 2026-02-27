@@ -42,6 +42,7 @@ class RuntimeWorker:
                 trade_result = self.runtime.trade_service.handle_cycle(
                     signals=scan_result.signals,
                     prices_by_symbol=scan_result.prices_by_symbol,
+                    chart_points_by_symbol=scan_result.chart_points_by_symbol,
                     symbol_states=scan_result.symbol_states,
                     scanned_count=scan_result.scanned_symbols,
                 )

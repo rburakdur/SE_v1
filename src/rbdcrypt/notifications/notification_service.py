@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import json
 from logging import Logger
 from typing import Callable, Protocol
+from urllib.parse import quote
 
 from .ntfy_client import NtfyClient
 
@@ -65,6 +67,7 @@ class NotificationService:
         state_store: NotificationStateStore | None = None,
         heartbeat_interval: timedelta = timedelta(minutes=30),
         summary_interval: timedelta = timedelta(minutes=60),
+        chart_enabled: bool = False,
     ) -> None:
         self.notifier = notifier
         self.logger = logger
@@ -72,6 +75,7 @@ class NotificationService:
         self.state_store = state_store
         self.heartbeat_interval = heartbeat_interval
         self.summary_interval = summary_interval
+        self.chart_enabled = chart_enabled
         self._last_heartbeat_at: datetime | None = None
         self._last_summary_at: datetime | None = None
 
@@ -144,6 +148,7 @@ class NotificationService:
         active_positions: int = 0,
         max_positions: int = 0,
         pending_signals: int = 0,
+        chart_points: list[float] | None = None,
         pnl_pct: float | None = None,
         scanned_count: int = 0,
     ) -> None:
@@ -165,11 +170,23 @@ class NotificationService:
                 f"arka plan: {max(0, int(pending_signals))}"
             ),
         ]
+        attachment = self._build_chart_attachment(
+            event="entry",
+            symbol=symbol,
+            side=side,
+            chart_points=chart_points,
+            entry_price=entry_price,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            exit_price=None,
+        )
         self._send(
             title=f"RBD-CRYPT entry {self._clean_symbol(symbol)}",
             message="\n".join(lines),
             priority=4,
             tags="chart_with_upwards_trend",
+            attach_url=attachment[0] if attachment else None,
+            filename=attachment[1] if attachment else None,
         )
 
     def on_position_close(
@@ -179,12 +196,15 @@ class NotificationService:
         side: str = "-",
         entry_price: float | None = None,
         exit_price: float | None = None,
+        tp_price: float | None = None,
+        sl_price: float | None = None,
         pnl_pct: float | None = None,
         reason: str | None = None,
         hold_minutes: float = 0.0,
         active_positions: int = 0,
         max_positions: int = 0,
         pending_signals: int = 0,
+        chart_points: list[float] | None = None,
         scanned_count: int = 0,
     ) -> None:
         direction = self._direction_text(side)
@@ -204,11 +224,23 @@ class NotificationService:
                 f"arka plan: {max(0, int(pending_signals))}"
             ),
         ]
+        attachment = self._build_chart_attachment(
+            event="exit",
+            symbol=symbol,
+            side=side,
+            chart_points=chart_points,
+            entry_price=entry_price,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            exit_price=exit_price,
+        )
         self._send(
             title=f"RBD-CRYPT exit {self._clean_symbol(symbol)}",
             message="\n".join(lines),
             priority=4,
             tags="x",
+            attach_url=attachment[0] if attachment else None,
+            filename=attachment[1] if attachment else None,
         )
 
     def on_error(
@@ -340,16 +372,121 @@ class NotificationService:
                 extra={"event": {"source": "notification_service", "key": name, "msg": str(exc)}},
             )
 
-    def _send(self, *, title: str, message: str, priority: int, tags: str | None) -> None:
+    def _send(
+        self,
+        *,
+        title: str,
+        message: str,
+        priority: int,
+        tags: str | None,
+        attach_url: str | None = None,
+        filename: str | None = None,
+    ) -> None:
         if self.notifier is None:
             return
         try:
-            self.notifier.notify(title, message, priority=priority, tags=tags)
+            self.notifier.notify(
+                title,
+                message,
+                priority=priority,
+                tags=tags,
+                attach_url=attach_url,
+                filename=filename,
+            )
         except Exception as exc:
             self.logger.error(
                 "ntfy_error",
                 extra={"event": {"source": "notification_service", "title": title, "msg": str(exc)}},
             )
+
+    def _build_chart_attachment(
+        self,
+        *,
+        event: str,
+        symbol: str,
+        side: str,
+        chart_points: list[float] | None,
+        entry_price: float | None,
+        tp_price: float | None,
+        sl_price: float | None,
+        exit_price: float | None,
+    ) -> tuple[str, str] | None:
+        if not self.chart_enabled or not chart_points:
+            return None
+        cleaned = [float(v) for v in chart_points if float(v) > 0]
+        if len(cleaned) < 8:
+            return None
+        series = cleaned[-48:]
+        labels = list(range(1, len(series) + 1))
+        side_norm = side.strip().lower() if side else "-"
+        up = side_norm in {"long", "buy"}
+        price_color = "#1d4ed8"
+        entry_color = "#16a34a" if up else "#dc2626"
+        tp_color = "#15803d"
+        sl_color = "#b91c1c"
+        exit_color = "#0f766e"
+
+        datasets: list[dict[str, object]] = [
+            {
+                "label": "price",
+                "data": [round(v, 6) for v in series],
+                "borderColor": price_color,
+                "borderWidth": 2,
+                "pointRadius": 0,
+                "fill": False,
+                "tension": 0.2,
+            }
+        ]
+        if entry_price is not None:
+            datasets.append(self._constant_line("entry", entry_price, len(series), entry_color))
+        if tp_price is not None:
+            datasets.append(self._constant_line("tp", tp_price, len(series), tp_color))
+        if sl_price is not None:
+            datasets.append(self._constant_line("sl", sl_price, len(series), sl_color))
+        if exit_price is not None:
+            datasets.append(self._constant_line("exit", exit_price, len(series), exit_color))
+
+        cfg = {
+            "type": "line",
+            "data": {
+                "labels": labels,
+                "datasets": datasets,
+            },
+            "options": {
+                "animation": False,
+                "plugins": {
+                    "legend": {"display": True, "position": "bottom"},
+                    "title": {
+                        "display": True,
+                        "text": f"{self._clean_symbol(symbol)} {event.upper()}",
+                    },
+                },
+                "scales": {
+                    "x": {"display": False},
+                    "y": {"display": True},
+                },
+            },
+        }
+        encoded = quote(json.dumps(cfg, separators=(",", ":")), safe="")
+        url = (
+            "https://quickchart.io/chart"
+            f"?format=png&width=920&height=520&devicePixelRatio=2&c={encoded}"
+        )
+        filename = f"{self._clean_symbol(symbol).lower()}-{event}.png"
+        return url, filename
+
+    @staticmethod
+    def _constant_line(label: str, value: float, size: int, color: str) -> dict[str, object]:
+        return {
+            "label": label,
+            "data": [round(float(value), 6)] * size,
+            "borderColor": color,
+            "borderWidth": 1,
+            "pointRadius": 0,
+            "fill": False,
+            "borderDash": [6, 4],
+            "tension": 0,
+        }
 
     @staticmethod
     def _legacy_perf(*, pnl_pct: float | None, active_positions: int, pending_signals: int) -> PerformanceSnapshot:

@@ -17,6 +17,8 @@ class NtfyClient:
         *,
         priority: int | None = None,
         tags: str | None = None,
+        attach_url: str | None = None,
+        filename: str | None = None,
     ) -> bool:
         if not self.config.enabled or not self.config.ntfy_url or not self.config.topic:
             return False
@@ -26,6 +28,10 @@ class NtfyClient:
             headers["Priority"] = str(int(priority))
         if tags:
             headers["Tags"] = tags
+        if attach_url:
+            headers["Attach"] = attach_url
+            if filename:
+                headers["Filename"] = filename
         resp = self.session.post(
             url,
             data=message.encode("utf-8"),
