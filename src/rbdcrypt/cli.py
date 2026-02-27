@@ -42,6 +42,124 @@ def _parse_dt(value: str | None) -> datetime | None:
     return dt
 
 
+def _portfolio_snapshot(runtime) -> dict[str, object]:
+    starting = float(runtime.settings.balance.starting_balance)
+    portfolio = runtime.repos.runtime_state.get_json("portfolio") or {}
+    balance = float(portfolio.get("balance", starting))
+    realized_pnl = float(portfolio.get("realized_pnl", balance - starting))
+    pnl_pct_cumulative = ((balance - starting) / starting * 100.0) if starting > 0 else 0.0
+    day_anchor = portfolio.get("day_anchor")
+    summary = runtime.repos.trades.summary()
+    with runtime.db.read_only() as conn:
+        row = conn.execute(
+            "SELECT updated_at FROM runtime_state WHERE key = 'portfolio'",
+        ).fetchone()
+    updated_at = row["updated_at"] if row else None
+    consistency_warning = None
+    if int(summary["total_trades"]) == 0 and abs(balance - starting) > 1e-9:
+        consistency_warning = "portfolio balance differs from starting_balance but trades_closed is empty"
+    return {
+        "starting_balance": starting,
+        "balance": balance,
+        "realized_pnl": realized_pnl,
+        "pnl_pct_cumulative": pnl_pct_cumulative,
+        "day_anchor": day_anchor,
+        "portfolio_updated_at": updated_at,
+        "consistency_warning": consistency_warning,
+    }
+
+
+def _decision_reason_summary(runtime, *, limit: int = 200) -> list[dict[str, object]]:
+    sql = """
+        WITH recent AS (
+            SELECT stage, outcome, blocked_reason
+            FROM signal_decisions
+            ORDER BY id DESC
+            LIMIT ?
+        )
+        SELECT
+            stage,
+            COALESCE(blocked_reason, '-') AS blocked_reason,
+            COUNT(*) AS count
+        FROM recent
+        WHERE outcome = 'blocked'
+        GROUP BY stage, COALESCE(blocked_reason, '-')
+        ORDER BY count DESC, stage ASC, blocked_reason ASC
+    """
+    with runtime.db.read_only() as conn:
+        rows = conn.execute(sql, (int(limit),)).fetchall()
+    return [
+        {
+            "stage": r["stage"],
+            "blocked_reason": r["blocked_reason"],
+            "count": int(r["count"]),
+        }
+        for r in rows
+    ]
+
+
+def _recent_blocked_decisions(runtime, *, limit: int = 20) -> list[dict[str, object]]:
+    sql = """
+        SELECT id, created_at, symbol, stage, blocked_reason, decision_payload_json
+        FROM signal_decisions
+        WHERE outcome = 'blocked'
+        ORDER BY id DESC
+        LIMIT ?
+    """
+    with runtime.db.read_only() as conn:
+        rows = conn.execute(sql, (int(limit),)).fetchall()
+    out: list[dict[str, object]] = []
+    for r in rows:
+        payload = json.loads(r["decision_payload_json"]) if r["decision_payload_json"] else {}
+        payload_hint = {
+            "rejection_stage": payload.get("rejection_stage"),
+            "candidate_score": payload.get("candidate_score"),
+            "auto_score": payload.get("auto_score"),
+            "effective_auto_power": payload.get("effective_auto_power"),
+            "flags": payload.get("flags"),
+            "thresholds": payload.get("thresholds"),
+        }
+        out.append(
+            {
+                "id": int(r["id"]),
+                "created_at": r["created_at"],
+                "symbol": r["symbol"],
+                "stage": r["stage"],
+                "blocked_reason": r["blocked_reason"],
+                "payload_hint": payload_hint,
+            }
+        )
+    return out
+
+
+def _recent_signals(runtime, *, limit: int = 20) -> list[dict[str, object]]:
+    sql = """
+        SELECT id, created_at, symbol, direction, price, power_score, candidate_pass, auto_pass, blocked_reasons
+        FROM signals
+        ORDER BY id DESC
+        LIMIT ?
+    """
+    with runtime.db.read_only() as conn:
+        rows = conn.execute(sql, (int(limit),)).fetchall()
+    out: list[dict[str, object]] = []
+    for r in rows:
+        blocked = json.loads(r["blocked_reasons"]) if r["blocked_reasons"] else []
+        out.append(
+            {
+                "id": int(r["id"]),
+                "created_at": r["created_at"],
+                "symbol": r["symbol"],
+                "direction": r["direction"],
+                "price": float(r["price"]),
+                "power_score": float(r["power_score"]),
+                "candidate_pass": bool(r["candidate_pass"]),
+                "auto_pass": bool(r["auto_pass"]),
+                "blocked_reasons": blocked,
+            }
+        )
+    return out
+
+
 @app.command()
 def backfill(
     symbols: str = typer.Option("top:10", help="Comma list (BTCUSDT,ETHUSDT) or top[:N]"),
@@ -143,6 +261,8 @@ def doctor() -> None:
         api_ok = runtime.binance_client.ping() if runtime.settings.runtime.enable_api_connectivity_check else None
         cooldowns = runtime.repos.runtime_state.get_json("cooldowns") or {}
         missed = runtime.repos.runtime_state.get_json("trade_missed_counters") or {}
+        portfolio = _portfolio_snapshot(runtime)
+        trade_summary = runtime.repos.trades.summary()
         env_file = resolve_env_file()
         report = {
             "db_integrity": runtime.repos.maintenance.integrity_check(),
@@ -155,10 +275,20 @@ def doctor() -> None:
             "last_scan_time": last_scan.isoformat() if last_scan else None,
             "active_positions": runtime.repos.positions.count_active(),
             "ohlcv_rows_total": runtime.repos.candles.count(),
+            "portfolio": portfolio,
+            "trades_closed_summary": {
+                "total_trades": int(trade_summary["total_trades"]),
+                "wins": int(trade_summary["wins"]),
+                "losses": int(trade_summary["total_trades"]) - int(trade_summary["wins"]),
+                "total_pnl_quote": float(trade_summary["total_pnl_quote"]),
+                "avg_pnl_pct": float(trade_summary["avg_pnl_pct"]),
+            },
             "cooldown_symbols": sorted(cooldowns.keys()),
             "cooldown_count": len(cooldowns),
             "error_count_last_1h": runtime.repos.errors.count_since(now - timedelta(hours=1)),
             "trade_missed_counters": missed,
+            "blocked_reasons_last_200": _decision_reason_summary(runtime, limit=200),
+            "recent_blocked_decisions": _recent_blocked_decisions(runtime, limit=15),
             "api_connectivity": api_ok,
             "notifications": {
                 "enabled": runtime.settings.notifications.enabled,
@@ -167,6 +297,26 @@ def doctor() -> None:
             },
             "scanner_heartbeat": runtime.repos.heartbeats.latest("scanner"),
             "trader_heartbeat": runtime.repos.heartbeats.latest("trader"),
+        }
+        _json_print(report)
+    finally:
+        runtime.close()
+
+
+@app.command("why-no-trade")
+def why_no_trade(
+    limit: int = typer.Option(100, min=20, max=1000, help="How many recent rows to inspect"),
+) -> None:
+    runtime = build_runtime()
+    try:
+        trade_summary = runtime.repos.trades.summary()
+        report = {
+            "portfolio": _portfolio_snapshot(runtime),
+            "active_positions": runtime.repos.positions.count_active(),
+            "trades_closed_total": int(trade_summary["total_trades"]),
+            "blocked_reasons_last_n": _decision_reason_summary(runtime, limit=limit),
+            "recent_blocked_decisions": _recent_blocked_decisions(runtime, limit=min(limit, 30)),
+            "recent_signals": _recent_signals(runtime, limit=min(limit, 30)),
         }
         _json_print(report)
     finally:

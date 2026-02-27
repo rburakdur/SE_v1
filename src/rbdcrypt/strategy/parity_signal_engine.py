@@ -62,12 +62,24 @@ class ParitySignalEngine:
         r = analysis.closed_row
 
         candidate_signal = get_flip_candidate_signal(r)
+        r_eval = r
+        if candidate_signal is None and cfg.allow_trend_continuation_entry:
+            trend = int(r.get("TREND", 0))
+            if trend > 0:
+                candidate_signal = "LONG"
+            elif trend < 0:
+                candidate_signal = "SHORT"
+            if candidate_signal is not None:
+                # Continuation mode synthesizes a directional trigger when no explicit flip exists.
+                r_eval = dict(r)
+                r_eval["FLIP_LONG"] = candidate_signal == "LONG"
+                r_eval["FLIP_SHORT"] = candidate_signal == "SHORT"
         cand_t = get_signal_thresholds(cfg, "candidate")
         auto_t = get_signal_thresholds(cfg, "auto")
-        candidate_flags = evaluate_signal_filters(r, candidate_signal, cand_t)
-        auto_flags = evaluate_signal_filters(r, candidate_signal, auto_t)
-        candidate_power, candidate_breakdown = calculate_power_score(r, cand_t)
-        auto_power, auto_breakdown = calculate_power_score(r, auto_t)
+        candidate_flags = evaluate_signal_filters(r_eval, candidate_signal, cand_t)
+        auto_flags = evaluate_signal_filters(r_eval, candidate_signal, auto_t)
+        candidate_power, candidate_breakdown = calculate_power_score(r_eval, cand_t)
+        auto_power, auto_breakdown = calculate_power_score(r_eval, auto_t)
         candidate_score = score_from_flags(candidate_flags)
         auto_score = score_from_flags(auto_flags)
 

@@ -135,6 +135,7 @@ class LegacyParitySettings(BaseModel):
     rsi_period: int = 9
     supertrend_multiplier: float = 2.8
     supertrend_atr_period: int = 10
+    allow_trend_continuation_entry: bool = False
 
     auto_entry_rsi_long: float = 62.0
     auto_entry_rsi_short: float = 38.0

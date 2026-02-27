@@ -71,6 +71,12 @@ Sağlık kontrolü:
 rbdcrypt doctor
 ```
 
+Neden trade açılmadığını hızlı teşhis:
+
+```bash
+rbdcrypt why-no-trade --limit 200
+```
+
 Özet analiz:
 
 ```bash

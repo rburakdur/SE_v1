@@ -39,7 +39,7 @@ class NotificationService:
             pnl_pct=pnl_pct,
             active_positions=active_positions,
             scanned_count=scanned_count,
-            extra_line="event: startup",
+            extra_line="event: startup | pnl basis: cumulative balance",
         )
 
     def on_cycle_completed(
@@ -59,7 +59,7 @@ class NotificationService:
             pnl_pct=pnl_pct,
             active_positions=active_positions,
             scanned_count=scanned_count,
-            extra_line="event: runtime loop",
+            extra_line="event: runtime loop | pnl basis: cumulative balance",
         )
         if self._last_summary_at and (now - self._last_summary_at) < self.summary_interval:
             return
@@ -70,7 +70,10 @@ class NotificationService:
             pnl_pct=pnl_pct,
             active_positions=active_positions,
             scanned_count=scanned_count,
-            extra_line=f"opened: {int(opened)} | closed: {int(closed)} | scan errors: {int(scan_errors)}",
+            extra_line=(
+                f"opened: {int(opened)} | closed: {int(closed)} | scan errors: {int(scan_errors)} | "
+                "pnl basis: cumulative balance"
+            ),
         )
         self._send(title="RBD-CRYPT summary", message=message, priority=2, tags="information_source")
 
