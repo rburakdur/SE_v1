@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import traceback
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from ..core.scheduler import IntervalScheduler
 from ..models.error_event import ErrorEvent
@@ -16,6 +17,25 @@ class RuntimeWorker:
     def run(self, *, one_shot: bool = False, max_iterations: int | None = None) -> None:
         scheduler = IntervalScheduler(interval_sec=self.runtime.settings.runtime.scan_interval_sec)
         self.runtime.trade_service.recover_active_positions()
+        if self.runtime.settings.notifications.notify_on_startup:
+            try:
+                self.runtime.notifier.notify(
+                    "rbdcrypt: bot started",
+                    (
+                        f"env={self.runtime.settings.env} "
+                        f"interval={self.runtime.settings.binance.interval} "
+                        f"workers={self.runtime.settings.runtime.worker_count} "
+                        f"max_symbols={self.runtime.settings.runtime.max_symbols} "
+                        f"started_at={datetime.now(tz=UTC).isoformat()}"
+                    ),
+                    priority=4,
+                    tags="rocket",
+                )
+            except Exception as exc:
+                self.runtime.logger.error(
+                    "ntfy_error",
+                    extra={"event": {"source": "runtime.worker.startup", "msg": str(exc)}},
+                )
         iterations = 0
         while True:
             self._run_cycle()

@@ -170,6 +170,7 @@ class NotificationSettings(BaseModel):
     topic: str | None = None
     enabled: bool = False
     timeout_sec: float = 4.0
+    notify_on_startup: bool = True
     notify_on_recovery: bool = True
     notify_on_open: bool = True
     notify_on_close: bool = True
