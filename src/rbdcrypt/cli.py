@@ -8,6 +8,7 @@ from typing import Annotated
 
 import typer
 
+from .config import resolve_env_file
 from .runtime.app import build_runtime
 from .runtime.worker import RuntimeWorker
 
@@ -142,9 +143,12 @@ def doctor() -> None:
         api_ok = runtime.binance_client.ping() if runtime.settings.runtime.enable_api_connectivity_check else None
         cooldowns = runtime.repos.runtime_state.get_json("cooldowns") or {}
         missed = runtime.repos.runtime_state.get_json("trade_missed_counters") or {}
+        env_file = resolve_env_file()
         report = {
             "db_integrity": runtime.repos.maintenance.integrity_check(),
             "db_path": str(runtime.settings.storage.db_path),
+            "config_env_file": str(env_file) if env_file else None,
+            "config_env_file_exists": bool(env_file and env_file.is_file()),
             "disk_free_mb": disk["free_mb"],
             "disk_min_required_mb": runtime.settings.housekeeping.min_disk_free_mb,
             "disk_ok": disk["free_mb"] >= runtime.settings.housekeeping.min_disk_free_mb,

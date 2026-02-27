@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -218,6 +219,29 @@ class AppSettings(BaseSettings):
 
 
 def load_settings() -> AppSettings:
-    settings = AppSettings()
+    env_file = resolve_env_file()
+    settings = AppSettings(_env_file=env_file) if env_file else AppSettings()
     settings.ensure_runtime_dirs()
     return settings
+
+
+def resolve_env_file() -> Path | None:
+    """Resolve a deterministic .env file path for local and systemd runs."""
+    candidates: list[Path] = []
+    explicit = os.getenv("RBDCRYPT_ENV_FILE")
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+
+    candidates.append(Path.cwd() / ".env")
+    candidates.append(Path(__file__).resolve().parents[2] / ".env")
+
+    seen: set[str] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if resolved.is_file():
+            return resolved
+    return None
