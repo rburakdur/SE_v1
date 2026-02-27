@@ -78,6 +78,8 @@ class NotificationService:
         self.chart_enabled = chart_enabled
         self._last_heartbeat_at: datetime | None = None
         self._last_summary_at: datetime | None = None
+        self._last_heartbeat_slot: str | None = None
+        self._last_summary_slot: str | None = None
 
     def on_engine_start(
         self,
@@ -119,18 +121,18 @@ class NotificationService:
             return
         lines = [
             f"{SUMMARY_EMOJI} SUMMARY",
-            *self._perf_lines(perf),
+            *self._perf_lines_dashboard(perf),
             (
                 f"bu saat: acilan {int(opened)} | kapanan {int(closed)} | "
                 f"hata {int(scan_errors)} | bekleyen {max(0, int(perf.pending_signals))}"
             ),
         ]
-        lines.extend(self._position_lines(open_positions))
+        lines.extend(self._position_lines_compact(open_positions))
         self._send(
-            title="RBD-CRYPT summary",
+            title=f"{SUMMARY_EMOJI} SUMMARY",
             message="\n".join(lines),
             priority=2,
-            tags="information_source",
+            tags="bar_chart",
         )
 
     def on_position_open(
@@ -153,13 +155,10 @@ class NotificationService:
         scanned_count: int = 0,
     ) -> None:
         direction = self._direction_text(side)
-        status = self._status_text(current_pnl_pct)
         lines = [
             f"{ENTRY_EMOJI} ENTRY",
             f"sembol: {self._clean_symbol(symbol)}",
             f"yon: {direction}",
-            f"durum: {status}",
-            f"sure: {max(0.0, float(hold_minutes)):.1f} dk",
             (
                 f"giris: {self._fmt_price(entry_price)} | "
                 f"tp: {self._fmt_price(tp_price)} ({self._fmt_pct(tp_target_pct)}) | "
@@ -181,10 +180,10 @@ class NotificationService:
             exit_price=None,
         )
         self._send(
-            title=f"RBD-CRYPT entry {self._clean_symbol(symbol)}",
+            title=f"{ENTRY_EMOJI} ENTRY {self._clean_symbol(symbol)}",
             message="\n".join(lines),
             priority=4,
-            tags="chart_with_upwards_trend",
+            tags="green_circle,chart_with_upwards_trend",
             attach_url=attachment[0] if attachment else None,
             filename=attachment[1] if attachment else None,
         )
@@ -235,10 +234,10 @@ class NotificationService:
             exit_price=exit_price,
         )
         self._send(
-            title=f"RBD-CRYPT exit {self._clean_symbol(symbol)}",
+            title=f"{EXIT_EMOJI} EXIT {self._clean_symbol(symbol)}",
             message="\n".join(lines),
             priority=4,
-            tags="x",
+            tags="red_circle,x",
             attach_url=attachment[0] if attachment else None,
             filename=attachment[1] if attachment else None,
         )
@@ -262,7 +261,7 @@ class NotificationService:
             f"kaynak: {source} | {error_type}: {error}",
         ]
         self._send(
-            title="RBD-CRYPT error",
+            title=f"{ERROR_EMOJI} ERROR",
             message="\n".join(lines),
             priority=5,
             tags="rotating_light",
@@ -280,20 +279,23 @@ class NotificationService:
             return
         lines = [
             f"{HEARTBEAT_EMOJI} HEARTBEAT",
-            *self._perf_lines(perf),
+            *self._perf_lines_dashboard(perf),
             f"event: {event}",
         ]
-        lines.extend(self._position_lines(open_positions))
+        lines.extend(self._position_lines_compact(open_positions))
         self._send(
-            title="RBD-CRYPT heartbeat",
+            title=f"{HEARTBEAT_EMOJI} HEARTBEAT",
             message="\n".join(lines),
             priority=3,
-            tags="heart",
+            tags="heart,bar_chart",
         )
 
-    def _perf_lines(self, perf: PerformanceSnapshot) -> list[str]:
+    def _perf_lines_dashboard(self, perf: PerformanceSnapshot) -> list[str]:
         return [
-            f"trade: toplam {perf.total_trades} | win {perf.wins} | loss {perf.losses} | winrate {perf.win_rate_pct:.1f}%",
+            (
+                f"trade: toplam {perf.total_trades} | kazanc {perf.wins} | "
+                f"kayip {perf.losses} | winrate {perf.win_rate_pct:.1f}%"
+            ),
             f"kasa: {perf.balance:.2f} | toplam pnl {self._fmt_pct(perf.pnl_pct_cumulative)}",
             f"gunluk pnl: {perf.day_pnl_quote:+.2f} ({self._fmt_pct(perf.day_pnl_pct)})",
             (
@@ -302,7 +304,7 @@ class NotificationService:
             ),
         ]
 
-    def _position_lines(self, open_positions: list[OpenPositionSnapshot] | None) -> list[str]:
+    def _position_lines_compact(self, open_positions: list[OpenPositionSnapshot] | None) -> list[str]:
         if open_positions is None:
             return []
         if not open_positions:
@@ -314,10 +316,7 @@ class NotificationService:
             lines.append(
                 (
                     f"{idx}) {self._clean_symbol(pos.symbol)} {direction} {status} "
-                    f"| pnl {self._fmt_pct(pos.current_pnl_pct)} | {max(0.0, pos.hold_minutes):.1f} dk "
-                    f"| giris {self._fmt_price(pos.entry_price)} "
-                    f"| tp {self._fmt_price(pos.tp_price)} ({self._fmt_pct(pos.tp_target_pct)}) "
-                    f"| sl {self._fmt_price(pos.sl_price)} ({self._fmt_pct(pos.sl_risk_pct)})"
+                    f"| {max(0.0, pos.hold_minutes):.1f} dk | pnl {self._fmt_pct(pos.current_pnl_pct)}"
                 )
             )
         extra = len(open_positions) - 4
@@ -326,10 +325,16 @@ class NotificationService:
         return lines
 
     def _should_send_heartbeat(self, now: datetime) -> bool:
-        return self._should_send(name="last_heartbeat_at", now=now, interval=self.heartbeat_interval)
+        # 01 and 31 minute slots each hour.
+        if now.minute not in {1, 31}:
+            return False
+        return self._should_send_slot(name="last_heartbeat_slot", slot=now.strftime("%Y-%m-%dT%H:%M"))
 
     def _should_send_summary(self, now: datetime) -> bool:
-        return self._should_send(name="last_summary_at", now=now, interval=self.summary_interval)
+        # Hourly summary on minute 01.
+        if now.minute != 1:
+            return False
+        return self._should_send_slot(name="last_summary_slot", slot=now.strftime("%Y-%m-%dT%H"))
 
     def _should_send(self, *, name: str, now: datetime, interval: timedelta) -> bool:
         cached = self._last_heartbeat_at if name == "last_heartbeat_at" else self._last_summary_at
@@ -358,6 +363,44 @@ class NotificationService:
             return datetime.fromisoformat(raw)
         except ValueError:
             return None
+
+    def _load_state_value(self, name: str) -> str | None:
+        if self.state_store is None:
+            return None
+        try:
+            state = self.state_store.get_json(STATE_KEY) or {}
+        except Exception:
+            return None
+        raw = state.get(name)
+        if isinstance(raw, str) and raw:
+            return raw
+        return None
+
+    def _save_state_value(self, name: str, value: str) -> None:
+        if self.state_store is None:
+            return
+        try:
+            state = self.state_store.get_json(STATE_KEY) or {}
+            state[name] = value
+            self.state_store.set_json(STATE_KEY, state)
+        except Exception as exc:
+            self.logger.error(
+                "ntfy_state_error",
+                extra={"event": {"source": "notification_service", "key": name, "msg": str(exc)}},
+            )
+
+    def _should_send_slot(self, *, name: str, slot: str) -> bool:
+        cached = self._last_heartbeat_slot if name == "last_heartbeat_slot" else self._last_summary_slot
+        if cached is None:
+            cached = self._load_state_value(name)
+        if cached == slot:
+            return False
+        if name == "last_heartbeat_slot":
+            self._last_heartbeat_slot = slot
+        else:
+            self._last_summary_slot = slot
+        self._save_state_value(name, slot)
+        return True
 
     def _save_state_time(self, name: str, value: datetime) -> None:
         if self.state_store is None:
@@ -421,7 +464,7 @@ class NotificationService:
         side_norm = side.strip().lower() if side else "-"
         up = side_norm in {"long", "buy"}
         price_color = "#1d4ed8"
-        entry_color = "#16a34a" if up else "#dc2626"
+        entry_color = "#f59e0b"
         tp_color = "#15803d"
         sl_color = "#b91c1c"
         exit_color = "#0f766e"
@@ -439,12 +482,26 @@ class NotificationService:
         ]
         if entry_price is not None:
             datasets.append(self._constant_line("entry", entry_price, len(series), entry_color))
+            datasets.append(self._point_marker("entry_point", series, entry_price, entry_color))
         if tp_price is not None:
             datasets.append(self._constant_line("tp", tp_price, len(series), tp_color))
         if sl_price is not None:
             datasets.append(self._constant_line("sl", sl_price, len(series), sl_color))
         if exit_price is not None:
             datasets.append(self._constant_line("exit", exit_price, len(series), exit_color))
+            datasets.append(self._point_marker("exit_point", series, exit_price, exit_color))
+
+        side_text = "LONG" if up else "SHORT" if side_norm in {"short", "sell"} else "-"
+        subtitle_parts = [f"YON: {side_text}"]
+        if entry_price is not None:
+            subtitle_parts.append(f"GIRIS {self._fmt_price(entry_price)}")
+        if tp_price is not None and entry_price and entry_price > 0:
+            tp_pct = abs(((tp_price - entry_price) / entry_price) * 100.0)
+            subtitle_parts.append(f"TP {self._fmt_price(tp_price)} (+{tp_pct:.2f}%)")
+        if sl_price is not None and entry_price and entry_price > 0:
+            sl_pct = abs(((entry_price - sl_price) / entry_price) * 100.0)
+            subtitle_parts.append(f"SL {self._fmt_price(sl_price)} ({sl_pct:.2f}%)")
+        subtitle = " | ".join(subtitle_parts)
 
         cfg = {
             "type": "line",
@@ -458,7 +515,7 @@ class NotificationService:
                     "legend": {"display": True, "position": "bottom"},
                     "title": {
                         "display": True,
-                        "text": f"{self._clean_symbol(symbol)} {event.upper()}",
+                        "text": [f"{self._clean_symbol(symbol)} {event.upper()}", subtitle],
                     },
                 },
                 "scales": {
@@ -486,6 +543,22 @@ class NotificationService:
             "fill": False,
             "borderDash": [6, 4],
             "tension": 0,
+        }
+
+    @staticmethod
+    def _point_marker(label: str, series: list[float], value: float, color: str) -> dict[str, object]:
+        nearest_idx = min(range(len(series)), key=lambda i: abs(series[i] - value))
+        points = [None] * len(series)
+        points[nearest_idx] = round(float(value), 6)
+        return {
+            "label": label,
+            "data": points,
+            "showLine": False,
+            "pointRadius": 6,
+            "pointHoverRadius": 6,
+            "pointBackgroundColor": color,
+            "pointBorderColor": "#111827",
+            "pointBorderWidth": 1,
         }
 
     @staticmethod

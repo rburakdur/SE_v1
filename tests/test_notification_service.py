@@ -74,7 +74,7 @@ def _perf() -> PerformanceSnapshot:
 
 
 def test_notification_service_formats_and_debounces_with_persisted_state() -> None:
-    clock = {"now": datetime(2026, 2, 27, 10, 0, tzinfo=UTC)}
+    clock = {"now": datetime(2026, 2, 27, 10, 1, tzinfo=UTC)}
     notifier = _FakeNtfyClient()
     state = _FakeStateStore()
     service = NotificationService(
@@ -85,7 +85,7 @@ def test_notification_service_formats_and_debounces_with_persisted_state() -> No
     )
 
     service.on_engine_start(performance=_perf(), open_positions=[])
-    clock["now"] += timedelta(minutes=10)
+    clock["now"] += timedelta(minutes=9)
     service.on_cycle_completed(performance=_perf(), open_positions=[], opened=1, closed=0, scan_errors=0)
 
     # Simulate service restart: state store should preserve debounce.
@@ -95,20 +95,17 @@ def test_notification_service_formats_and_debounces_with_persisted_state() -> No
         now_fn=lambda: clock["now"],
         state_store=state,
     )
-    clock["now"] += timedelta(minutes=10)  # 20m from heartbeat => no heartbeat
+    clock["now"] += timedelta(minutes=21)  # 10:31 slot => heartbeat
     service2.on_cycle_completed(performance=_perf(), open_positions=[], opened=0, closed=0, scan_errors=0)
-    clock["now"] += timedelta(minutes=11)  # 31m from first heartbeat => heartbeat
-    service2.on_cycle_completed(performance=_perf(), open_positions=[], opened=0, closed=1, scan_errors=0)
-    clock["now"] += timedelta(minutes=40)  # >60m from summary => heartbeat + summary
+    clock["now"] += timedelta(minutes=30)  # 11:01 slot => heartbeat + summary
     service2.on_cycle_completed(performance=_perf(), open_positions=[], opened=0, closed=0, scan_errors=1)
 
     headers = [str(call["message"]).splitlines()[0] for call in notifier.calls]
-    assert len(headers) == 5
+    assert len(headers) == 4
     assert headers[0].endswith("HEARTBEAT")
-    assert headers[1].endswith("SUMMARY")
+    assert headers[1].endswith("HEARTBEAT")
     assert headers[2].endswith("HEARTBEAT")
-    assert headers[3].endswith("HEARTBEAT")
-    assert headers[4].endswith("SUMMARY")
+    assert headers[3].endswith("SUMMARY")
 
     for call in notifier.calls:
         message = str(call["message"])
@@ -140,7 +137,8 @@ def test_notification_service_formats_entry_message() -> None:
     message = str(notifier.calls[0]["message"])
     assert "ENTRY" in message
     assert "yon:" in message
-    assert "durum:" in message
+    assert "durum:" not in message
+    assert "sure:" not in message
     assert "giris:" in message
     assert "tp:" in message
     assert "sl:" in message
@@ -160,7 +158,6 @@ def test_notification_service_attaches_png_chart_only_for_entry_exit() -> None:
     )
     chart_points = [60000.0 + i * 10 for i in range(64)]
 
-    service.on_engine_start(performance=_perf(), open_positions=[])
     service.on_position_open(
         symbol="BTCUSDT",
         side="long",
@@ -188,10 +185,9 @@ def test_notification_service_attaches_png_chart_only_for_entry_exit() -> None:
         chart_points=chart_points,
     )
 
-    heartbeat_call = notifier.calls[0]
-    entry_call = notifier.calls[1]
-    exit_call = notifier.calls[2]
-    assert heartbeat_call["attach_url"] is None
+    assert len(notifier.calls) == 2
+    entry_call = notifier.calls[0]
+    exit_call = notifier.calls[1]
     assert entry_call["attach_url"] is not None
     assert str(entry_call["attach_url"]).startswith("https://quickchart.io/chart?format=png")
     assert entry_call["filename"] == "btcusdt-entry.png"
