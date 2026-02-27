@@ -482,14 +482,30 @@ class NotificationService:
         ]
         if entry_price is not None:
             datasets.append(self._constant_line("entry", entry_price, len(series), entry_color))
-            datasets.append(self._point_marker("entry_point", series, entry_price, entry_color))
+            datasets.append(
+                self._point_marker(
+                    "entry_point",
+                    series,
+                    entry_price,
+                    entry_color,
+                    index=len(series) - 1,
+                )
+            )
         if tp_price is not None:
             datasets.append(self._constant_line("tp", tp_price, len(series), tp_color))
         if sl_price is not None:
             datasets.append(self._constant_line("sl", sl_price, len(series), sl_color))
         if exit_price is not None:
             datasets.append(self._constant_line("exit", exit_price, len(series), exit_color))
-            datasets.append(self._point_marker("exit_point", series, exit_price, exit_color))
+            datasets.append(
+                self._point_marker(
+                    "exit_point",
+                    series,
+                    exit_price,
+                    exit_color,
+                    index=len(series) - 1,
+                )
+            )
 
         side_text = "LONG" if up else "SHORT" if side_norm in {"short", "sell"} else "-"
         subtitle_parts = [f"YON: {side_text}"]
@@ -546,8 +562,19 @@ class NotificationService:
         }
 
     @staticmethod
-    def _point_marker(label: str, series: list[float], value: float, color: str) -> dict[str, object]:
-        nearest_idx = min(range(len(series)), key=lambda i: abs(series[i] - value))
+    def _point_marker(
+        label: str,
+        series: list[float],
+        value: float,
+        color: str,
+        *,
+        index: int | None = None,
+    ) -> dict[str, object]:
+        if index is not None and 0 <= int(index) < len(series):
+            nearest_idx = int(index)
+        else:
+            # Prefer right-most candle when the distance tie happens.
+            nearest_idx = max(range(len(series)), key=lambda i: (-abs(series[i] - value), i))
         points = [None] * len(series)
         points[nearest_idx] = round(float(value), 6)
         return {

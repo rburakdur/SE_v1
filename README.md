@@ -107,6 +107,15 @@ Full clean reset (destructive):
 rbdcrypt reset-state --yes --backup --include-ohlcv
 ```
 
+Not: `reset-state` varsayilan olarak runtime aktif gorunuyorsa islemi durdurur.
+Temiz reset icin once servisi durdurup sonra reset atin:
+
+```bash
+sudo systemctl stop rbdcrypt.service
+rbdcrypt reset-state --yes --backup --include-ohlcv
+sudo systemctl start rbdcrypt.service
+```
+
 Historical backfill (SQLite `ohlcv_futures`):
 
 ```bash

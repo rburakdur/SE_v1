@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from rbdcrypt.cli import _reset_runtime_state
+from rbdcrypt.cli import _reset_runtime_state, _runtime_recently_active
 from rbdcrypt.config import AppSettings
+from rbdcrypt.storage.repositories import build_repositories
 
 
 def _runtime_stub(temp_db):
     settings = AppSettings(_env_file=None)
     settings.storage.db_path = temp_db.path
-    return SimpleNamespace(db=temp_db, settings=settings)
+    repos = build_repositories(temp_db)
+    return SimpleNamespace(db=temp_db, settings=settings, repos=repos)
 
 
 def test_reset_runtime_state_resets_core_tables_and_defaults(temp_db) -> None:
@@ -98,3 +101,25 @@ def test_reset_runtime_state_can_clear_ohlcv(temp_db) -> None:
     with temp_db.read_only() as conn:
         ohlcv_count = int(conn.execute("SELECT COUNT(*) AS c FROM ohlcv_futures").fetchone()["c"])
     assert ohlcv_count == 0
+
+
+def test_runtime_recently_active_detects_fresh_heartbeat(temp_db) -> None:
+    runtime = _runtime_stub(temp_db)
+    now = datetime.now(tz=UTC)
+    with temp_db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO heartbeats (component, status, meta_json, created_at) VALUES (?, ?, ?, ?)",
+            ("scanner", "ok", "{}", now.isoformat()),
+        )
+    assert _runtime_recently_active(runtime) is True
+
+
+def test_runtime_recently_active_ignores_stale_heartbeat(temp_db) -> None:
+    runtime = _runtime_stub(temp_db)
+    old = datetime.now(tz=UTC) - timedelta(minutes=10)
+    with temp_db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO heartbeats (component, status, meta_json, created_at) VALUES (?, ?, ?, ?)",
+            ("trader", "ok", "{}", old.isoformat()),
+        )
+    assert _runtime_recently_active(runtime) is False

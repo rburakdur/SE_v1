@@ -105,6 +105,29 @@ def _reset_runtime_state(runtime, *, include_ohlcv: bool) -> dict[str, object]:
     }
 
 
+def _runtime_recently_active(runtime) -> bool:
+    threshold = timedelta(seconds=max(120, int(runtime.settings.runtime.scan_interval_sec) * 3))
+    latest: datetime | None = None
+    for component in ("scanner", "trader"):
+        hb = runtime.repos.heartbeats.latest(component)
+        if not hb:
+            continue
+        created = hb.get("created_at")
+        if not isinstance(created, str) or not created:
+            continue
+        try:
+            ts = datetime.fromisoformat(created)
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        if latest is None or ts > latest:
+            latest = ts
+    if latest is None:
+        return False
+    return (datetime.now(tz=UTC) - latest) <= threshold
+
+
 @app.command()
 def run(
     one_shot: bool = typer.Option(False, help="Run a single scan/trade cycle and exit"),
@@ -142,11 +165,20 @@ def reset_state_cmd(
     ),
     out: Path = typer.Option(Path("bot_data/backups"), help="Backup output directory"),
     label: str | None = typer.Option("manual_reset", help="Optional backup label"),
+    force_while_active: bool = typer.Option(
+        False,
+        "--force-while-active",
+        help="Allow reset even if scanner/trader heartbeat looks active",
+    ),
 ) -> None:
     if not yes:
         raise typer.BadParameter("Refusing to reset without --yes")
     runtime = build_runtime()
     try:
+        if _runtime_recently_active(runtime) and not force_while_active:
+            raise typer.BadParameter(
+                "Runtime appears active. Stop service first (recommended), or use --force-while-active."
+            )
         backup_path = _create_state_backup_zip(runtime, out_dir=out, label=label) if backup else None
         result = _reset_runtime_state(runtime, include_ohlcv=include_ohlcv)
         _json_print({"backup_zip": str(backup_path) if backup_path else None, **result})

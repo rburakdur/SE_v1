@@ -196,6 +196,13 @@ def test_notification_service_attaches_png_chart_only_for_entry_exit() -> None:
     assert exit_call["filename"] == "btcusdt-exit.png"
 
 
+def test_point_marker_prefers_latest_when_tied() -> None:
+    marker = NotificationService._point_marker("m", [1.0, 2.0, 1.0], 1.0, "#fff")
+    data = marker["data"]
+    assert data[0] is None
+    assert data[2] == 1.0
+
+
 def test_notification_service_is_fail_safe() -> None:
     clock_now = datetime(2026, 2, 27, 10, 0, tzinfo=UTC)
     service = NotificationService(
