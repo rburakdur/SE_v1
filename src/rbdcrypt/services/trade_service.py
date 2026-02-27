@@ -9,7 +9,7 @@ from ..brokers.base import BrokerInterface
 from ..config import AppSettings
 from ..core.portfolio import BalanceTracker
 from ..core.policies import BalanceMode
-from ..core.risk import build_risk_plan, build_risk_plan_from_levels, pnl_pct
+from ..core.risk import build_risk_plan, build_risk_plan_from_levels
 from ..core.state_machine import update_position_mark
 from ..models.error_event import ErrorEvent
 from ..models.position import ActivePosition
@@ -27,6 +27,7 @@ class TradeCycleResult:
     closed: int = 0
     skipped: int = 0
     missed_signals: int = 0
+    max_pos_blocked: int = 0
 
 
 class TradeService:
@@ -149,7 +150,11 @@ class TradeService:
         self._open_new_positions(now, signals, result)
         self._persist_portfolio(now)
         self._persist_cooldowns(now)
-        self._persist_missed_counters(now, last_cycle=result.missed_signals)
+        self._persist_missed_counters(
+            now,
+            last_cycle=result.missed_signals,
+            max_pos_blocked=result.max_pos_blocked,
+        )
         self.repos.heartbeats.insert(
             component="trader",
             status="ok",
@@ -158,6 +163,7 @@ class TradeService:
                 "closed": result.closed,
                 "skipped": result.skipped,
                 "missed_signals": result.missed_signals,
+                "max_pos_blocked": result.max_pos_blocked,
                 "active_positions": len(self._active_cache),
             },
         )
@@ -232,11 +238,17 @@ class TradeService:
                 )
                 if self.settings.notifications.notify_on_close:
                     if self.notification_service is not None:
+                        hold_min = max(0.0, (trade.closed_at - trade.opened_at).total_seconds() / 60.0)
                         self.notification_service.on_position_close(
                             symbol=trade.symbol,
+                            side=trade.side.value,
+                            entry_price=trade.entry_price,
+                            exit_price=trade.exit_price,
                             pnl_pct=trade.pnl_pct * 100.0,
+                            hold_minutes=hold_min,
                             active_positions=len(self._active_cache),
-                            scanned_count=self._cycle_scanned_count,
+                            max_positions=int(self.settings.risk.max_active_positions),
+                            pending_signals=result.max_pos_blocked,
                             reason=trade.exit_reason,
                         )
                     else:
@@ -290,6 +302,9 @@ class TradeService:
                     continue
                 if len(self._active_cache) >= self.settings.risk.max_active_positions:
                     self._block_signal(signal, now, result, "MAX_POS", {"stage": "execution_filter"})
+                    continue
+                if self.repos.positions.count_active() >= self.settings.risk.max_active_positions:
+                    self._block_signal(signal, now, result, "MAX_POS", {"stage": "execution_filter", "source": "db_guard"})
                     continue
                 if self.settings.legacy_parity.enabled and signal.meta.get("entry_atr14") is not None:
                     atr_val = float(signal.meta["entry_atr14"])
@@ -373,11 +388,20 @@ class TradeService:
                 )
                 if self.settings.notifications.notify_on_open:
                     if self.notification_service is not None:
+                        tp_target_pct, sl_risk_pct = self._tp_sl_targets_pct(position)
                         self.notification_service.on_position_open(
                             symbol=position.symbol,
-                            pnl_pct=0.0,
+                            side=position.side.value,
+                            entry_price=position.entry_price,
+                            tp_price=position.current_tp,
+                            sl_price=position.current_sl,
+                            tp_target_pct=tp_target_pct,
+                            sl_risk_pct=sl_risk_pct,
+                            hold_minutes=0.0,
+                            current_pnl_pct=0.0,
                             active_positions=len(self._active_cache),
-                            scanned_count=self._cycle_scanned_count,
+                            max_positions=int(self.settings.risk.max_active_positions),
+                            pending_signals=result.max_pos_blocked,
                         )
                     else:
                         detail = self.settings.notifications.detail_level
@@ -444,16 +468,29 @@ class TradeService:
             self._missed_hour_anchor = anchor
             self._hourly_missed_signals = 0
 
-    def _persist_missed_counters(self, now: datetime, *, last_cycle: int) -> None:
+    def _persist_missed_counters(self, now: datetime, *, last_cycle: int, max_pos_blocked: int) -> None:
         self.repos.runtime_state.set_json(
             "trade_missed_counters",
             {
                 "hour_anchor": self._missed_hour_anchor or now.astimezone(UTC).strftime("%Y-%m-%dT%H:00:00+00:00"),
                 "hourly_missed_signals": self._hourly_missed_signals,
                 "last_cycle_missed_signals": int(last_cycle),
+                "last_cycle_max_pos_blocked": int(max_pos_blocked),
                 "updated_at": now.isoformat(),
             },
         )
+
+    @staticmethod
+    def _tp_sl_targets_pct(position: ActivePosition) -> tuple[float, float]:
+        if position.entry_price <= 0:
+            return 0.0, 0.0
+        if position.side.value == "short":
+            tp_target = ((position.entry_price - position.current_tp) / position.entry_price) * 100.0
+            sl_risk = ((position.current_sl - position.entry_price) / position.entry_price) * 100.0
+            return tp_target, sl_risk
+        tp_target = ((position.current_tp - position.entry_price) / position.entry_price) * 100.0
+        sl_risk = ((position.entry_price - position.current_sl) / position.entry_price) * 100.0
+        return tp_target, sl_risk
 
     def _block_signal(
         self,
@@ -465,6 +502,8 @@ class TradeService:
     ) -> None:
         result.skipped += 1
         result.missed_signals += 1
+        if reason.startswith("MAX_POS"):
+            result.max_pos_blocked += 1
         self._hourly_missed_signals += 1
         self._record_execution_decision(
             signal=signal,

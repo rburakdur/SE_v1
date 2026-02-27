@@ -69,7 +69,12 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
     )
     signal_engine = ParitySignalEngine(settings=settings, interval=settings.binance.interval)
     notifier = NtfyClient(settings.notifications)
-    notification_service = NotificationService(notifier=notifier, logger=logger, now_fn=clock.now)
+    notification_service = NotificationService(
+        notifier=notifier,
+        logger=logger,
+        now_fn=clock.now,
+        state_store=repos.runtime_state,
+    )
 
     scan_service = ScanService(
         settings=settings,
