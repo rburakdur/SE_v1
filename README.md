@@ -171,7 +171,7 @@ Aktif eventler:
 
 Ntfy komut modu:
 - `NOTIFICATIONS__NTFY_COMMAND_ENABLED=true` ise bot `<topic>-cmd` kanalını dinler.
-- `logs` mesajı gönderildiğinde bot CSV + log + sqlite export paketini üretip ana topic'e dosya olarak geri yollar.
+- `logs` mesajı gönderildiğinde bot CSV + log export paketini üretip ana topic'e dosya olarak geri yollar.
 
 ## State Güvenliği / Persistence
 

@@ -185,10 +185,6 @@ class RuntimeWorker:
         log_path = self.runtime.settings.logging.log_path
         if log_path.is_file():
             shutil.copy2(log_path, export_dir / log_path.name)
-        db_path = self.runtime.settings.storage.db_path
-        if db_path.is_file():
-            shutil.copy2(db_path, export_dir / db_path.name)
-
         archive_path = export_root / f"ntfy_analysis_{ts}.tar.gz"
         with tarfile.open(archive_path, mode="w:gz") as tf:
             tf.add(export_dir, arcname=export_dir.name)
