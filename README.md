@@ -18,7 +18,7 @@ Python tabanlı, modüler, düşük kaynak dostu kripto futures signal/trading e
   - ATR çarpanlı TP/SL (`SL_M`, `TP_M` parity)
   - timeout + ST grace + trend flip + stale exit + max-hold sonrası break-even move
   - cooldown (entry block) + missed-signal counters (SQLite runtime_state)
-- CLI komutları: `run`, `doctor`, `analyze`, `rotate/prune`, `export-csv`, `backfill`, `replay`
+- CLI komutları: `run`, `doctor`, `analyze`, `rotate/prune`, `export-csv`, `backfill`, `replay`, `backup-state`, `reset-state`
 - Testler: strategy/risk/exit/recovery/sqlite atomicity çekirdeği
 
 ## Mimari Özeti
@@ -93,6 +93,18 @@ CSV export:
 
 ```bash
 rbdcrypt export-csv trades_closed --out bot_data/exports
+```
+
+State backup (zip):
+
+```bash
+rbdcrypt backup-state --out bot_data/backups --label manual
+```
+
+Full clean reset (destructive):
+
+```bash
+rbdcrypt reset-state --yes --backup --include-ohlcv
 ```
 
 Historical backfill (SQLite `ohlcv_futures`):

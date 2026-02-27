@@ -5,6 +5,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import typer
 
@@ -20,6 +21,90 @@ def _json_print(payload: object) -> None:
     typer.echo(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
 
 
+def _create_state_backup_zip(runtime, *, out_dir: Path, label: str | None = None) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
+    suffix = f"_{label.strip()}" if label and label.strip() else ""
+    backup_path = out_dir / f"rbdcrypt_state_backup_{ts}{suffix}.zip"
+
+    env_file = resolve_env_file()
+    db_path = runtime.settings.storage.db_path
+    log_path = runtime.settings.logging.log_path
+    meta = {
+        "created_at_utc": datetime.now(tz=UTC).isoformat(),
+        "db_path": str(db_path),
+        "env_file": str(env_file) if env_file else None,
+        "log_path": str(log_path),
+        "label": label,
+    }
+
+    with ZipFile(backup_path, mode="w", compression=ZIP_DEFLATED) as zf:
+        if db_path.is_file():
+            zf.write(db_path, arcname="rbdcrypt.sqlite3")
+        if env_file and env_file.is_file():
+            zf.write(env_file, arcname=".env")
+        if log_path.is_file():
+            zf.write(log_path, arcname=f"logs/{log_path.name}")
+        zf.writestr("meta.json", json.dumps(meta, indent=2, ensure_ascii=False))
+    return backup_path
+
+
+def _reset_runtime_state(runtime, *, include_ohlcv: bool) -> dict[str, object]:
+    tables = [
+        "signal_decisions",
+        "signals",
+        "market_context",
+        "positions_active",
+        "trades_closed",
+        "errors",
+        "heartbeats",
+        "runtime_state",
+    ]
+    if include_ohlcv:
+        tables.append("ohlcv_futures")
+
+    now = datetime.now(tz=UTC)
+    now_iso = now.isoformat()
+    hour_anchor = now.strftime("%Y-%m-%dT%H:00:00+00:00")
+    portfolio = {
+        "balance": float(runtime.settings.balance.starting_balance),
+        "realized_pnl": 0.0,
+        "day_anchor": now_iso,
+    }
+    default_state = {
+        "portfolio": portfolio,
+        "cooldowns": {},
+        "trade_missed_counters": {
+            "hour_anchor": hour_anchor,
+            "hourly_missed_signals": 0,
+            "last_cycle_missed_signals": 0,
+            "last_cycle_max_pos_blocked": 0,
+            "updated_at": now_iso,
+        },
+        "notifications_state": {},
+    }
+
+    deleted: dict[str, int] = {}
+    with runtime.db.transaction() as conn:
+        for table in tables:
+            row = conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
+            deleted[table] = int(row["c"] if row else 0)
+        for table in tables:
+            conn.execute(f"DELETE FROM {table}")
+        for key, value in default_state.items():
+            conn.execute(
+                "INSERT INTO runtime_state (key, value_json, updated_at) VALUES (?, ?, ?)",
+                (key, json.dumps(value, ensure_ascii=True, separators=(",", ":")), now_iso),
+            )
+
+    return {
+        "deleted_rows": deleted,
+        "portfolio": portfolio,
+        "include_ohlcv": include_ohlcv,
+        "reset_at_utc": now_iso,
+    }
+
+
 @app.command()
 def run(
     one_shot: bool = typer.Option(False, help="Run a single scan/trade cycle and exit"),
@@ -29,6 +114,42 @@ def run(
     try:
         worker = RuntimeWorker(runtime)
         worker.run(one_shot=one_shot, max_iterations=iterations)
+    finally:
+        runtime.close()
+
+
+@app.command("backup-state")
+def backup_state_cmd(
+    out: Path = typer.Option(Path("bot_data/backups"), help="Backup output directory"),
+    label: str | None = typer.Option(None, help="Optional label suffix for zip filename"),
+) -> None:
+    runtime = build_runtime()
+    try:
+        backup_path = _create_state_backup_zip(runtime, out_dir=out, label=label)
+        _json_print({"backup_zip": str(backup_path)})
+    finally:
+        runtime.close()
+
+
+@app.command("reset-state")
+def reset_state_cmd(
+    yes: bool = typer.Option(False, "--yes", help="Confirm destructive reset"),
+    backup: bool = typer.Option(True, "--backup/--no-backup", help="Create a zip backup before reset"),
+    include_ohlcv: bool = typer.Option(
+        True,
+        "--include-ohlcv/--keep-ohlcv",
+        help="Delete candle cache too (full clean reset)",
+    ),
+    out: Path = typer.Option(Path("bot_data/backups"), help="Backup output directory"),
+    label: str | None = typer.Option("manual_reset", help="Optional backup label"),
+) -> None:
+    if not yes:
+        raise typer.BadParameter("Refusing to reset without --yes")
+    runtime = build_runtime()
+    try:
+        backup_path = _create_state_backup_zip(runtime, out_dir=out, label=label) if backup else None
+        result = _reset_runtime_state(runtime, include_ohlcv=include_ohlcv)
+        _json_print({"backup_zip": str(backup_path) if backup_path else None, **result})
     finally:
         runtime.close()
 
