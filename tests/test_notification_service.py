@@ -136,9 +136,11 @@ def test_notification_service_formats_entry_message() -> None:
     )
     assert len(notifier.calls) == 1
     assert notifier.calls[0]["title"] == "ENTRY BTCUSDT LONG"
+    assert notifier.calls[0]["tags"] == "white_check_mark"
     message = str(notifier.calls[0]["message"])
-    assert "ENTRY" in message
-    assert "islem tipi:" in message
+    assert "ENTRY" not in message
+    assert "islem tipi:" not in message
+    assert "sembol:" not in message
     assert "durum:" not in message
     assert "sure:" not in message
     assert "giris:" in message
@@ -244,9 +246,9 @@ def test_notification_service_formats_exit_title_and_status() -> None:
     assert len(notifier.calls) == 1
     call = notifier.calls[0]
     assert call["title"] == "TP BTCUSDT +1.00%"
-    assert call["tags"] == "white_check_mark,green_circle"
+    assert call["tags"] == "white_check_mark"
     msg = str(call["message"])
-    assert "TP" in msg
+    assert "sembol:" not in msg
     assert "islem tipi:" in msg
     assert "sure:" in msg
     assert "giris:" in msg

@@ -12,8 +12,6 @@ from .ntfy_client import NtfyClient
 
 STATE_KEY = "notifications_state"
 
-ENTRY_EMOJI = "\U0001F3C1"
-EXIT_EMOJI = "\U0001F534"
 SUMMARY_EMOJI = "\U0001F4CA"
 ERROR_EMOJI = "\u26A0\ufe0f"
 UP_EMOJI = "\u2b06\ufe0f"
@@ -146,13 +144,9 @@ class NotificationService:
         pnl_pct: float | None = None,
         scanned_count: int = 0,
     ) -> None:
-        direction = self._direction_text(side)
         clean_symbol = self._clean_symbol(symbol)
         side_text = self._side_text(side)
         lines = [
-            f"{ENTRY_EMOJI} ENTRY",
-            f"sembol: {clean_symbol}",
-            f"islem tipi: {direction}",
             f"tp: {self._fmt_price(tp_price)} ({self._fmt_pct(tp_target_pct)})",
             f"sl: {self._fmt_price(sl_price)} ({self._fmt_pct(sl_risk_pct)})",
             f"giris: {self._fmt_price(entry_price)}",
@@ -178,7 +172,7 @@ class NotificationService:
             title=f"ENTRY {clean_symbol} {side_text}",
             message="\n".join(lines),
             priority=4,
-            tags="checkered_flag,green_circle",
+            tags="white_check_mark",
             attach_url=attachment[0] if attachment else None,
             filename=attachment[1] if attachment else None,
         )
@@ -206,11 +200,8 @@ class NotificationService:
         clean_symbol = self._clean_symbol(symbol)
         reason_code = self._reason_code(reason)
         reason_label = self._reason_label(reason_code)
-        reason_emoji = self._reason_emoji(reason_code)
         reason_text = reason.strip().upper() if isinstance(reason, str) and reason.strip() else "-"
         lines = [
-            f"{reason_emoji} {reason_label}",
-            f"sembol: {clean_symbol}",
             f"islem tipi: {direction}",
             f"sure: {max(0.0, float(hold_minutes)):.1f} dk",
             f"giris: {self._fmt_price(entry_price)}",
@@ -422,7 +413,7 @@ class NotificationService:
         cleaned = [float(v) for v in chart_points if float(v) > 0]
         if len(cleaned) < 8:
             return None
-        series = cleaned[-48:]
+        series = cleaned[-16:]
         labels = list(range(1, len(series) + 1))
         side_norm = side.strip().lower() if side else "-"
         up = side_norm in {"long", "buy"}
@@ -538,7 +529,7 @@ class NotificationService:
         encoded = quote(json.dumps(cfg, separators=(",", ":")), safe="")
         url = (
             "https://quickchart.io/chart"
-            f"?format=png&width=920&height=520&devicePixelRatio=2&c={encoded}"
+            f"?format=png&width=720&height=420&devicePixelRatio=2&c={encoded}"
         )
         filename = f"{self._clean_symbol(symbol).lower()}-{event}.png"
         return url, filename
@@ -675,20 +666,12 @@ class NotificationService:
         return "EXIT"
 
     @staticmethod
-    def _reason_emoji(reason_code: str) -> str:
-        if reason_code == "tp":
-            return PROFIT_EMOJI
-        if reason_code == "sl":
-            return LOSS_EMOJI
-        return EXIT_EMOJI
-
-    @staticmethod
     def _exit_tags(*, reason_code: str, pnl_pct: float) -> str:
         if reason_code == "tp":
-            return "white_check_mark,green_circle"
+            return "white_check_mark"
         if reason_code == "sl":
-            return "x,red_circle"
-        return "green_circle" if pnl_pct >= 0 else "red_circle"
+            return "x"
+        return "white_check_mark" if pnl_pct >= 0 else "x"
 
     @staticmethod
     def _status_text(pnl_pct: float | None) -> str:
