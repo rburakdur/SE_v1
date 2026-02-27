@@ -73,7 +73,7 @@ class RuntimeSettings(BaseModel):
 
 class BalanceSettings(BaseModel):
     mode: Literal["cumulative", "daily_reset"] = "cumulative"
-    starting_balance: float = 1000.0
+    starting_balance: float = 100.0
     daily_reset_enabled: bool = False
 
     def resolved_mode(self) -> Literal["cumulative", "daily_reset"]:
@@ -86,6 +86,7 @@ class RiskSettings(BaseModel):
     risk_per_trade_pct: float = 0.01
     leverage: float = 1.0
     max_active_positions: int = 3
+    fixed_notional_per_trade: float | None = 25.0
     min_rr: float = 1.2
     min_notional: float = 10.0
     fee_pct_per_side: float = 0.0004
@@ -181,7 +182,7 @@ class NotificationSettings(BaseModel):
     notify_on_open: bool = True
     notify_on_close: bool = True
     notify_on_scan_degraded: bool = True
-    notify_on_auto_signal_summary: bool = True
+    notify_on_auto_signal_summary: bool = False
     notify_on_runtime_error: bool = True
     notify_on_missed_signal: bool = False
 

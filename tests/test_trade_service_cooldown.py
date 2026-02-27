@@ -146,3 +146,38 @@ def test_trade_service_close_persists_symbol_cooldown(repos) -> None:
     cooldowns = repos.runtime_state.get_json("cooldowns")
     assert cooldowns is not None
     assert "BTCUSDT" in cooldowns
+
+
+def test_trade_service_uses_fixed_notional_per_trade(repos) -> None:
+    now = datetime(2026, 2, 26, 12, 0, tzinfo=UTC)
+    settings = _base_settings()
+    settings.risk.fixed_notional_per_trade = 25.0
+    settings.risk.leverage = 1.0
+
+    service = TradeService.from_settings(
+        settings=settings,
+        broker=PaperBroker(),
+        repos=repos,
+        now_fn=lambda: now,
+        logger=_logger(),
+    )
+
+    signal = SignalEvent(
+        symbol="SOLUSDT",
+        interval="5m",
+        bar_time=now - timedelta(minutes=5),
+        direction=SignalDirection.LONG,
+        price=100.0,
+        power_score=70.0,
+        candidate_pass=True,
+        auto_pass=True,
+        meta={"entry_atr14": 1.0},
+    )
+    signal_id = repos.signals.insert_signal(signal)
+    signal.meta["db_signal_id"] = signal_id
+
+    result = service.handle_cycle(signals=[signal], prices_by_symbol={}, symbol_states={})
+    assert result.opened == 1
+    active = repos.positions.list_active()
+    assert len(active) == 1
+    assert abs(active[0].notional - 25.0) < 1e-9

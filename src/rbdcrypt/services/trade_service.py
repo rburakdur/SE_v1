@@ -9,7 +9,7 @@ from ..brokers.base import BrokerInterface
 from ..config import AppSettings
 from ..core.portfolio import BalanceTracker
 from ..core.policies import BalanceMode
-from ..core.risk import build_risk_plan, build_risk_plan_from_levels
+from ..core.risk import RiskPlan, build_risk_plan, build_risk_plan_from_levels
 from ..core.state_machine import update_position_mark
 from ..models.error_event import ErrorEvent
 from ..models.position import ActivePosition
@@ -335,6 +335,7 @@ class TradeService:
                         side=signal.direction.value,
                         min_notional=self.settings.risk.min_notional,
                     )
+                risk_plan = self._apply_fixed_notional(risk_plan)
                 if risk_plan.rr_initial < self.settings.risk.min_rr:
                     self._block_signal(
                         signal,
@@ -491,6 +492,24 @@ class TradeService:
         tp_target = ((position.current_tp - position.entry_price) / position.entry_price) * 100.0
         sl_risk = ((position.entry_price - position.current_sl) / position.entry_price) * 100.0
         return tp_target, sl_risk
+
+    def _apply_fixed_notional(self, plan: RiskPlan) -> RiskPlan:
+        fixed = self.settings.risk.fixed_notional_per_trade
+        if fixed is None:
+            return plan
+        fixed_value = float(fixed)
+        if fixed_value <= 0:
+            return plan
+        leverage = max(float(self.settings.risk.leverage), 1e-12)
+        qty = fixed_value * leverage / max(plan.entry_price, 1e-12)
+        return RiskPlan(
+            qty=qty,
+            notional=fixed_value,
+            entry_price=plan.entry_price,
+            initial_sl=plan.initial_sl,
+            initial_tp=plan.initial_tp,
+            rr_initial=plan.rr_initial,
+        )
 
     def _block_signal(
         self,
