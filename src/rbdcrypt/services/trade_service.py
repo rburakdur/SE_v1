@@ -221,14 +221,25 @@ class TradeService:
                     },
                 )
                 if self.settings.notifications.notify_on_close:
+                    hold_min = max(0.0, (trade.closed_at - trade.opened_at).total_seconds() / 60.0)
+                    detail = self.settings.notifications.detail_level
+                    if detail == "compact":
+                        message = (
+                            f"{trade.side.value.upper()} reason={trade.exit_reason} "
+                            f"pnl_pct={trade.pnl_pct * 100:.2f}% pnl_quote={trade.pnl_quote:.4f} "
+                            f"rr={trade.rr_initial:.2f}"
+                        )
+                    else:
+                        message = (
+                            f"{trade.side.value.upper()} reason={trade.exit_reason}\n"
+                            f"entry={trade.entry_price:.6f} exit={trade.exit_price:.6f} hold_min={hold_min:.1f}\n"
+                            f"pnl_pct={trade.pnl_pct * 100:.2f}% pnl_quote={trade.pnl_quote:.4f} fee={trade.fee_paid:.4f}\n"
+                            f"rr_initial={trade.rr_initial:.2f} sl0={trade.initial_sl:.6f} tp0={trade.initial_tp:.6f}\n"
+                            f"active_positions={len(self._active_cache)} balance={self.balance_tracker.balance:.2f}"
+                        )
                     self._notify(
                         f"rbdcrypt: closed {trade.symbol}",
-                        (
-                            f"{trade.side.value.upper()} reason={trade.exit_reason}\n"
-                            f"entry={trade.entry_price:.6f} exit={trade.exit_price:.6f}\n"
-                            f"pnl_pct={trade.pnl_pct * 100:.2f}% pnl_quote={trade.pnl_quote:.4f}\n"
-                            f"rr_initial={trade.rr_initial:.2f}"
-                        ),
+                        message,
                         priority=4,
                         tags="moneybag" if trade.pnl_quote >= 0 else "x",
                     )
@@ -342,14 +353,25 @@ class TradeService:
                     },
                 )
                 if self.settings.notifications.notify_on_open:
+                    detail = self.settings.notifications.detail_level
+                    if detail == "compact":
+                        message = (
+                            f"{position.side.value.upper()} entry={position.entry_price:.6f} "
+                            f"rr={risk_plan.rr_initial:.2f} score={signal.power_score:.1f}"
+                        )
+                    else:
+                        blocked = ",".join(signal.blocked_reasons) if signal.blocked_reasons else "-"
+                        message = (
+                            f"{position.side.value.upper()} entry={position.entry_price:.6f} bar={signal.bar_time.isoformat()}\n"
+                            f"sl0={position.initial_sl:.6f} tp0={position.initial_tp:.6f} rr_initial={risk_plan.rr_initial:.2f}\n"
+                            f"qty={position.qty:.6f} notional={position.notional:.2f} lev={position.leverage:.1f}\n"
+                            f"score={signal.power_score:.1f} reject_stage={signal.meta.get('rejection_stage', '-')}"
+                            f" blocked={blocked}\n"
+                            f"active_positions={len(self._active_cache)} balance={self.balance_tracker.balance:.2f}"
+                        )
                     self._notify(
                         f"rbdcrypt: opened {position.symbol}",
-                        (
-                            f"{position.side.value.upper()} entry={position.entry_price:.6f}\n"
-                            f"sl={position.initial_sl:.6f} tp={position.initial_tp:.6f}\n"
-                            f"rr_initial={risk_plan.rr_initial:.2f} notional={position.notional:.2f}\n"
-                            f"score={signal.power_score:.1f}"
-                        ),
+                        message,
                         priority=4,
                         tags="chart_with_upwards_trend",
                     )
@@ -436,9 +458,19 @@ class TradeService:
             },
         )
         if self.settings.notifications.notify_on_missed_signal:
+            detail = self.settings.notifications.detail_level
+            stage = signal.meta.get("rejection_stage", "-")
+            if detail == "compact":
+                message = f"reason={reason} score={signal.power_score:.1f}"
+            else:
+                message = (
+                    f"reason={reason} stage={stage}\n"
+                    f"score={signal.power_score:.1f} dir={signal.direction.value.upper()} bar={signal.bar_time.isoformat()}\n"
+                    f"hourly_missed={self._hourly_missed_signals}"
+                )
             self._notify(
                 f"rbdcrypt: missed {signal.symbol}",
-                f"reason={reason} score={signal.power_score:.1f}",
+                message,
                 priority=2,
                 tags="warning",
             )

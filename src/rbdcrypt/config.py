@@ -171,6 +171,10 @@ class NotificationSettings(BaseModel):
     topic: str | None = None
     enabled: bool = False
     timeout_sec: float = 4.0
+    detail_level: Literal["compact", "detailed"] = "detailed"
+    auto_signal_top_n: int = 5
+    notify_on_cycle_summary: bool = False
+    cycle_summary_min_interval_minutes: int = 30
     notify_on_startup: bool = True
     notify_on_recovery: bool = True
     notify_on_open: bool = True

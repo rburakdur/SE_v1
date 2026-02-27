@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import traceback
+from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 from ..config import AppSettings
@@ -51,6 +52,7 @@ class ScanService:
         self.now_fn = now_fn
         self.logger = logger
         self.notifier = notifier
+        self._last_cycle_summary_notify_at: datetime | None = None
 
     def scan_once(self) -> ScanRunResult:
         started = self.now_fn()
@@ -59,6 +61,7 @@ class ScanService:
         prices: dict[str, float] = {}
         symbol_states: dict[str, SymbolBarState] = {}
         error_count = 0
+        error_samples: list[str] = []
 
         try:
             btc_candles = self.fetcher.fetch_btc_context_candles()
@@ -67,12 +70,14 @@ class ScanService:
             symbol_states[btc_symbol_state.symbol] = btc_symbol_state
         except Exception as exc:
             error_count += 1
+            error_samples.append(f"btc_context:{exc.__class__.__name__}")
             self._record_error("scan_service.btc_context", exc, {})
 
         try:
             symbols = self.fetcher.fetch_universe_symbols()
         except Exception as exc:
             error_count += 1
+            error_samples.append(f"fetch_universe:{exc.__class__.__name__}")
             self._record_error("scan_service.fetch_universe", exc, {})
             finished = self.now_fn()
             return ScanRunResult(
@@ -89,6 +94,8 @@ class ScanService:
         candles_by_symbol, fetch_errors = self.fetcher.fetch_many_candles(symbols, self.settings.runtime.worker_count)
         for symbol, message in fetch_errors.items():
             error_count += 1
+            if len(error_samples) < 5:
+                error_samples.append(f"{symbol}:{message}")
             self.repos.errors.insert(
                 ErrorEvent(
                     source="scan_service.fetch_candles",
@@ -128,6 +135,8 @@ class ScanService:
                     )
             except Exception as exc:
                 error_count += 1
+                if len(error_samples) < 5:
+                    error_samples.append(f"{symbol}:{exc.__class__.__name__}")
                 self._record_error("scan_service.symbol", exc, {"symbol": symbol})
                 continue
 
@@ -150,21 +159,28 @@ class ScanService:
             extra={"event": {"scanned": len(signals), "errors": error_count, "auto": payload["auto_signals"]}},
         )
         if self.settings.notifications.notify_on_scan_degraded and error_count > 0:
+            sample_text = " | ".join(error_samples[:3]) if error_samples else "-"
             self._notify(
                 "rbdcrypt: scan degraded",
-                f"errors={error_count} scanned={len(signals)} auto={payload['auto_signals']}",
+                (
+                    f"errors={error_count} scanned={len(signals)} auto={payload['auto_signals']}\n"
+                    f"samples={sample_text}"
+                ),
                 priority=4,
                 tags="warning",
             )
         if self.settings.notifications.notify_on_auto_signal_summary and payload["auto_signals"] > 0:
-            top = sorted((s for s in signals if s.auto_pass), key=lambda x: x.power_score, reverse=True)[:5]
-            lines = [f"{s.symbol} {s.direction.value.upper()} score={s.power_score:.1f}" for s in top]
+            top_n = max(1, int(self.settings.notifications.auto_signal_top_n))
+            top = sorted((s for s in signals if s.auto_pass), key=lambda x: x.power_score, reverse=True)[:top_n]
+            lines = [self._format_auto_signal_line(i + 1, s) for i, s in enumerate(top)]
             self._notify(
                 "rbdcrypt: auto signals",
                 "\n".join(lines),
                 priority=3,
                 tags="chart_with_upwards_trend",
             )
+        if self.settings.notifications.notify_on_cycle_summary:
+            self._maybe_notify_cycle_summary(started, finished, signals, error_count)
         return ScanRunResult(
             started_at=started,
             finished_at=finished,
@@ -206,3 +222,49 @@ class ScanService:
             self.notifier.notify(title, message, priority=priority, tags=tags)
         except Exception as exc:
             self.logger.error("ntfy_error", extra={"event": {"source": "scan_service", "msg": str(exc)}})
+
+    def _format_auto_signal_line(self, rank: int, signal: SignalEvent) -> str:
+        detail = self.settings.notifications.detail_level
+        if detail == "compact":
+            return f"{rank}) {signal.symbol} {signal.direction.value.upper()} score={signal.power_score:.1f}"
+        rsi = signal.metrics.get("rsi")
+        adx = signal.metrics.get("adx")
+        atr_pct = signal.metrics.get("atr_pct")
+        vol_ratio = signal.metrics.get("vol_ratio")
+        return (
+            f"{rank}) {signal.symbol} {signal.direction.value.upper()} score={signal.power_score:.1f} "
+            f"rsi={self._fmt(rsi)} adx={self._fmt(adx)} atr%={self._fmt_pct(atr_pct)} vol={self._fmt(vol_ratio)}"
+        )
+
+    def _maybe_notify_cycle_summary(
+        self,
+        started: datetime,
+        finished: datetime,
+        signals: list[SignalEvent],
+        error_count: int,
+    ) -> None:
+        now = finished
+        min_interval = timedelta(minutes=max(1, int(self.settings.notifications.cycle_summary_min_interval_minutes)))
+        if self._last_cycle_summary_notify_at and (now - self._last_cycle_summary_notify_at) < min_interval:
+            return
+        self._last_cycle_summary_notify_at = now
+        auto_signals = [s for s in signals if s.auto_pass]
+        directions = Counter(s.direction.value for s in auto_signals)
+        msg = (
+            f"window={started.isoformat()} -> {finished.isoformat()}\n"
+            f"scanned={len(signals)} auto={len(auto_signals)} errors={error_count}\n"
+            f"auto_long={directions.get('long', 0)} auto_short={directions.get('short', 0)}"
+        )
+        self._notify("rbdcrypt: cycle summary", msg, priority=2, tags="information_source")
+
+    @staticmethod
+    def _fmt(value: float | None) -> str:
+        if value is None:
+            return "-"
+        return f"{value:.2f}"
+
+    @staticmethod
+    def _fmt_pct(value: float | None) -> str:
+        if value is None:
+            return "-"
+        return f"{value:.2f}"

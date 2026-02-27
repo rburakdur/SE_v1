@@ -26,6 +26,8 @@ class RuntimeWorker:
                         f"interval={self.runtime.settings.binance.interval} "
                         f"workers={self.runtime.settings.runtime.worker_count} "
                         f"max_symbols={self.runtime.settings.runtime.max_symbols} "
+                        f"notify_topic={self.runtime.settings.notifications.topic} "
+                        f"detail={self.runtime.settings.notifications.detail_level} "
                         f"started_at={datetime.now(tz=UTC).isoformat()}"
                     ),
                     priority=4,
