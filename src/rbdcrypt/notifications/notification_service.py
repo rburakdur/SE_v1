@@ -129,7 +129,7 @@ class NotificationService:
         ]
         lines.extend(self._position_lines_compact(open_positions))
         self._send(
-            title=f"{SUMMARY_EMOJI} SUMMARY",
+            title="SUMMARY",
             message="\n".join(lines),
             priority=2,
             tags="bar_chart",
@@ -180,7 +180,7 @@ class NotificationService:
             exit_price=None,
         )
         self._send(
-            title=f"{ENTRY_EMOJI} ENTRY {self._clean_symbol(symbol)}",
+            title=f"ENTRY {self._clean_symbol(symbol)}",
             message="\n".join(lines),
             priority=4,
             tags="green_circle,chart_with_upwards_trend",
@@ -234,7 +234,7 @@ class NotificationService:
             exit_price=exit_price,
         )
         self._send(
-            title=f"{EXIT_EMOJI} EXIT {self._clean_symbol(symbol)}",
+            title=f"EXIT {self._clean_symbol(symbol)}",
             message="\n".join(lines),
             priority=4,
             tags="red_circle,x",
@@ -261,7 +261,7 @@ class NotificationService:
             f"kaynak: {source} | {error_type}: {error}",
         ]
         self._send(
-            title=f"{ERROR_EMOJI} ERROR",
+            title="ERROR",
             message="\n".join(lines),
             priority=5,
             tags="rotating_light",
@@ -284,7 +284,7 @@ class NotificationService:
         ]
         lines.extend(self._position_lines_compact(open_positions))
         self._send(
-            title=f"{HEARTBEAT_EMOJI} HEARTBEAT",
+            title="HEARTBEAT",
             message="\n".join(lines),
             priority=3,
             tags="heart,bar_chart",
