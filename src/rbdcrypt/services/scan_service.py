@@ -13,6 +13,7 @@ from ..models.market_context import MarketContext
 from ..models.signal import SignalEvent
 from ..models.symbol_state import SymbolBarState
 from ..notifications.ntfy_client import NtfyClient
+from ..notifications.notification_service import NotificationService
 from ..storage.repositories import Repositories
 from ..strategy.parity_signal_engine import ParitySignalEngine
 
@@ -44,6 +45,7 @@ class ScanService:
         now_fn: Callable[[], datetime],
         logger,
         notifier: NtfyClient | None = None,
+        notification_service: NotificationService | None = None,
     ) -> None:
         self.settings = settings
         self.fetcher = fetcher
@@ -52,6 +54,7 @@ class ScanService:
         self.now_fn = now_fn
         self.logger = logger
         self.notifier = notifier
+        self.notification_service = notification_service
         self._last_cycle_summary_notify_at: datetime | None = None
 
     def scan_once(self) -> ScanRunResult:
@@ -179,7 +182,7 @@ class ScanService:
                 priority=3,
                 tags="chart_with_upwards_trend",
             )
-        if self.settings.notifications.notify_on_cycle_summary:
+        if self.settings.notifications.notify_on_cycle_summary and self.notification_service is None:
             self._maybe_notify_cycle_summary(started, finished, signals, error_count)
         return ScanRunResult(
             started_at=started,
@@ -208,12 +211,24 @@ class ScanService:
             extra={"event": {"source": source, "type": exc.__class__.__name__, "msg": str(exc), **context}},
         )
         if self.settings.notifications.notify_on_runtime_error and source not in {"scan_service.fetch_candles", "scan_service.symbol"}:
-            self._notify(
-                "rbdcrypt: scan error",
-                f"{source} {exc.__class__.__name__}: {exc}",
-                priority=5,
-                tags="rotating_light",
-            )
+            symbol_raw = context.get("symbol")
+            symbol = str(symbol_raw) if isinstance(symbol_raw, str) and symbol_raw else "-"
+            if self.notification_service is not None:
+                self.notification_service.on_error(
+                    source=source,
+                    error=exc,
+                    symbol=symbol,
+                    pnl_pct=None,
+                    active_positions=self.repos.positions.count_active(),
+                    scanned_count=0,
+                )
+            else:
+                self._notify(
+                    "rbdcrypt: scan error",
+                    f"{source} {exc.__class__.__name__}: {exc}",
+                    priority=5,
+                    tags="rotating_light",
+                )
 
     def _notify(self, title: str, message: str, *, priority: int = 3, tags: str | None = None) -> None:
         if self.notifier is None:

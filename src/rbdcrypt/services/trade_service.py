@@ -16,6 +16,7 @@ from ..models.position import ActivePosition
 from ..models.signal import SignalDecision, SignalEvent
 from ..models.symbol_state import SymbolBarState
 from ..notifications.ntfy_client import NtfyClient
+from ..notifications.notification_service import NotificationService
 from ..storage.repositories import Repositories
 from ..strategy.exit_engine import evaluate_exit, evaluate_legacy_exit
 
@@ -39,6 +40,7 @@ class TradeService:
         now_fn: Callable[[], datetime],
         logger,
         notifier: NtfyClient | None = None,
+        notification_service: NotificationService | None = None,
     ) -> None:
         self.settings = settings
         self.broker = broker
@@ -47,10 +49,12 @@ class TradeService:
         self.now_fn = now_fn
         self.logger = logger
         self.notifier = notifier
+        self.notification_service = notification_service
         self._active_cache: dict[str, ActivePosition] = {}
         self._cooldowns: dict[str, datetime] = {}
         self._hourly_missed_signals: int = 0
         self._missed_hour_anchor: str | None = None
+        self._cycle_scanned_count: int = 0
 
     @classmethod
     def from_settings(
@@ -62,6 +66,7 @@ class TradeService:
         now_fn: Callable[[], datetime],
         logger,
         notifier: NtfyClient | None = None,
+        notification_service: NotificationService | None = None,
     ) -> "TradeService":
         mode = BalanceMode(settings.balance.resolved_mode())
         tracker = BalanceTracker(
@@ -82,6 +87,7 @@ class TradeService:
             now_fn=now_fn,
             logger=logger,
             notifier=notifier,
+            notification_service=notification_service,
         )
         cooldowns_payload = repos.runtime_state.get_json("cooldowns") or {}
         cooldowns: dict[str, datetime] = {}
@@ -129,10 +135,14 @@ class TradeService:
         signals: list[SignalEvent],
         prices_by_symbol: dict[str, float],
         symbol_states: dict[str, SymbolBarState] | None = None,
+        scanned_count: int | None = None,
     ) -> TradeCycleResult:
         result = TradeCycleResult()
         now = self.now_fn()
         symbol_states = symbol_states or {}
+        default_scanned = len(signals)
+        resolved_scanned = scanned_count if scanned_count is not None else default_scanned
+        self._cycle_scanned_count = max(0, int(resolved_scanned))
         self._reset_hourly_missed_if_needed(now)
         self._refresh_cache()
         self._manage_exits(now, prices_by_symbol, symbol_states, result)
@@ -221,28 +231,37 @@ class TradeService:
                     },
                 )
                 if self.settings.notifications.notify_on_close:
-                    hold_min = max(0.0, (trade.closed_at - trade.opened_at).total_seconds() / 60.0)
-                    detail = self.settings.notifications.detail_level
-                    if detail == "compact":
-                        message = (
-                            f"{trade.side.value.upper()} reason={trade.exit_reason} "
-                            f"pnl_pct={trade.pnl_pct * 100:.2f}% pnl_quote={trade.pnl_quote:.4f} "
-                            f"rr={trade.rr_initial:.2f}"
+                    if self.notification_service is not None:
+                        self.notification_service.on_position_close(
+                            symbol=trade.symbol,
+                            pnl_pct=trade.pnl_pct * 100.0,
+                            active_positions=len(self._active_cache),
+                            scanned_count=self._cycle_scanned_count,
+                            reason=trade.exit_reason,
                         )
                     else:
-                        message = (
-                            f"{trade.side.value.upper()} reason={trade.exit_reason}\n"
-                            f"entry={trade.entry_price:.6f} exit={trade.exit_price:.6f} hold_min={hold_min:.1f}\n"
-                            f"pnl_pct={trade.pnl_pct * 100:.2f}% pnl_quote={trade.pnl_quote:.4f} fee={trade.fee_paid:.4f}\n"
-                            f"rr_initial={trade.rr_initial:.2f} sl0={trade.initial_sl:.6f} tp0={trade.initial_tp:.6f}\n"
-                            f"active_positions={len(self._active_cache)} balance={self.balance_tracker.balance:.2f}"
+                        hold_min = max(0.0, (trade.closed_at - trade.opened_at).total_seconds() / 60.0)
+                        detail = self.settings.notifications.detail_level
+                        if detail == "compact":
+                            message = (
+                                f"{trade.side.value.upper()} reason={trade.exit_reason} "
+                                f"pnl_pct={trade.pnl_pct * 100:.2f}% pnl_quote={trade.pnl_quote:.4f} "
+                                f"rr={trade.rr_initial:.2f}"
+                            )
+                        else:
+                            message = (
+                                f"{trade.side.value.upper()} reason={trade.exit_reason}\n"
+                                f"entry={trade.entry_price:.6f} exit={trade.exit_price:.6f} hold_min={hold_min:.1f}\n"
+                                f"pnl_pct={trade.pnl_pct * 100:.2f}% pnl_quote={trade.pnl_quote:.4f} fee={trade.fee_paid:.4f}\n"
+                                f"rr_initial={trade.rr_initial:.2f} sl0={trade.initial_sl:.6f} tp0={trade.initial_tp:.6f}\n"
+                                f"active_positions={len(self._active_cache)} balance={self.balance_tracker.balance:.2f}"
+                            )
+                        self._notify(
+                            f"rbdcrypt: closed {trade.symbol}",
+                            message,
+                            priority=4,
+                            tags="moneybag" if trade.pnl_quote >= 0 else "x",
                         )
-                    self._notify(
-                        f"rbdcrypt: closed {trade.symbol}",
-                        message,
-                        priority=4,
-                        tags="moneybag" if trade.pnl_quote >= 0 else "x",
-                    )
             else:
                 self.repos.positions.upsert_active(position)
 
@@ -353,28 +372,36 @@ class TradeService:
                     },
                 )
                 if self.settings.notifications.notify_on_open:
-                    detail = self.settings.notifications.detail_level
-                    if detail == "compact":
-                        message = (
-                            f"{position.side.value.upper()} entry={position.entry_price:.6f} "
-                            f"rr={risk_plan.rr_initial:.2f} score={signal.power_score:.1f}"
+                    if self.notification_service is not None:
+                        self.notification_service.on_position_open(
+                            symbol=position.symbol,
+                            pnl_pct=0.0,
+                            active_positions=len(self._active_cache),
+                            scanned_count=self._cycle_scanned_count,
                         )
                     else:
-                        blocked = ",".join(signal.blocked_reasons) if signal.blocked_reasons else "-"
-                        message = (
-                            f"{position.side.value.upper()} entry={position.entry_price:.6f} bar={signal.bar_time.isoformat()}\n"
-                            f"sl0={position.initial_sl:.6f} tp0={position.initial_tp:.6f} rr_initial={risk_plan.rr_initial:.2f}\n"
-                            f"qty={position.qty:.6f} notional={position.notional:.2f} lev={position.leverage:.1f}\n"
-                            f"score={signal.power_score:.1f} reject_stage={signal.meta.get('rejection_stage', '-')}"
-                            f" blocked={blocked}\n"
-                            f"active_positions={len(self._active_cache)} balance={self.balance_tracker.balance:.2f}"
+                        detail = self.settings.notifications.detail_level
+                        if detail == "compact":
+                            message = (
+                                f"{position.side.value.upper()} entry={position.entry_price:.6f} "
+                                f"rr={risk_plan.rr_initial:.2f} score={signal.power_score:.1f}"
+                            )
+                        else:
+                            blocked = ",".join(signal.blocked_reasons) if signal.blocked_reasons else "-"
+                            message = (
+                                f"{position.side.value.upper()} entry={position.entry_price:.6f} bar={signal.bar_time.isoformat()}\n"
+                                f"sl0={position.initial_sl:.6f} tp0={position.initial_tp:.6f} rr_initial={risk_plan.rr_initial:.2f}\n"
+                                f"qty={position.qty:.6f} notional={position.notional:.2f} lev={position.leverage:.1f}\n"
+                                f"score={signal.power_score:.1f} reject_stage={signal.meta.get('rejection_stage', '-')}"
+                                f" blocked={blocked}\n"
+                                f"active_positions={len(self._active_cache)} balance={self.balance_tracker.balance:.2f}"
+                            )
+                        self._notify(
+                            f"rbdcrypt: opened {position.symbol}",
+                            message,
+                            priority=4,
+                            tags="chart_with_upwards_trend",
                         )
-                    self._notify(
-                        f"rbdcrypt: opened {position.symbol}",
-                        message,
-                        priority=4,
-                        tags="chart_with_upwards_trend",
-                    )
             except Exception as exc:
                 self._block_signal(
                     signal,
@@ -516,12 +543,24 @@ class TradeService:
             extra={"event": {"source": source, "type": exc.__class__.__name__, "msg": str(exc), **context}},
         )
         if self.settings.notifications.notify_on_runtime_error:
-            self._notify(
-                "rbdcrypt: trade error",
-                f"{source} {exc.__class__.__name__}: {exc}",
-                priority=5,
-                tags="rotating_light",
-            )
+            symbol_raw = context.get("symbol")
+            symbol = str(symbol_raw) if isinstance(symbol_raw, str) and symbol_raw else "-"
+            if self.notification_service is not None:
+                self.notification_service.on_error(
+                    source=source,
+                    error=exc,
+                    symbol=symbol,
+                    pnl_pct=None,
+                    active_positions=len(self._active_cache),
+                    scanned_count=self._cycle_scanned_count,
+                )
+            else:
+                self._notify(
+                    "rbdcrypt: trade error",
+                    f"{source} {exc.__class__.__name__}: {exc}",
+                    priority=5,
+                    tags="rotating_light",
+                )
 
     def _notify(self, title: str, message: str, *, priority: int = 3, tags: str | None = None) -> None:
         if self.notifier is None:

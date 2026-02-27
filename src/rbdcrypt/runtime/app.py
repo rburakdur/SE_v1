@@ -10,6 +10,7 @@ from ..data.binance_client import BinanceClient
 from ..data.market_fetcher import MarketFetcher
 from ..data.rate_limit import SimpleRateLimiter
 from ..notifications.ntfy_client import NtfyClient
+from ..notifications.notification_service import NotificationService
 from ..services.housekeeping_service import HousekeepingService
 from ..services.backfill_service import BackfillService
 from ..services.metrics_service import MetricsService
@@ -37,6 +38,7 @@ class RuntimeContainer:
     replay_service: ReplayService
     metrics_service: MetricsService
     housekeeping_service: HousekeepingService
+    notification_service: NotificationService
     notifier: NtfyClient
     logger: Logger
     clock: SystemClock
@@ -67,6 +69,7 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
     )
     signal_engine = ParitySignalEngine(settings=settings, interval=settings.binance.interval)
     notifier = NtfyClient(settings.notifications)
+    notification_service = NotificationService(notifier=notifier, logger=logger, now_fn=clock.now)
 
     scan_service = ScanService(
         settings=settings,
@@ -76,6 +79,7 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
         now_fn=clock.now,
         logger=logger,
         notifier=notifier,
+        notification_service=notification_service,
     )
     trade_service = TradeService.from_settings(
         settings=settings,
@@ -84,6 +88,7 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
         now_fn=clock.now,
         logger=logger,
         notifier=notifier,
+        notification_service=notification_service,
     )
     metrics_service = MetricsService(repos=repos)
     housekeeping_service = HousekeepingService(settings=settings, repos=repos)
@@ -103,6 +108,7 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
         replay_service=replay_service,
         metrics_service=metrics_service,
         housekeeping_service=housekeeping_service,
+        notification_service=notification_service,
         notifier=notifier,
         logger=logger,
         clock=clock,

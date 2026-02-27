@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, PositiveInt
+from pydantic import AliasChoices, BaseModel, Field, PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -168,8 +168,8 @@ class LegacyParitySettings(BaseModel):
 
 class NotificationSettings(BaseModel):
     ntfy_url: str | None = None
-    topic: str | None = None
-    enabled: bool = False
+    topic: str | None = Field(default=None, validation_alias=AliasChoices("topic", "ntfy_topic"))
+    enabled: bool = Field(default=False, validation_alias=AliasChoices("enabled", "ntfy_enabled"))
     timeout_sec: float = 4.0
     detail_level: Literal["compact", "detailed"] = "detailed"
     auto_signal_top_n: int = 5
