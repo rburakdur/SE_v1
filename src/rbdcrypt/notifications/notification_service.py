@@ -264,7 +264,12 @@ class NotificationService:
             tags="rotating_light",
         )
 
-    def process_ntfy_commands(self, *, export_logs_bundle: Callable[[str], list[Path]]) -> None:
+    def process_ntfy_commands(
+        self,
+        *,
+        export_logs_bundle: Callable[[str], list[Path]],
+        publish_logs_bundle: Callable[[str, list[Path]], str | None] | None = None,
+    ) -> None:
         if self.notifier is None:
             return
         cfg = self.notifier.config
@@ -316,6 +321,23 @@ class NotificationService:
             if command not in {"log", "log-all"}:
                 continue
             files = export_logs_bundle(command)
+            if publish_logs_bundle is not None:
+                try:
+                    backup_url = publish_logs_bundle(command, files)
+                except Exception as exc:
+                    backup_url = None
+                    self.logger.error(
+                        "ntfy_error",
+                        extra={"event": {"source": "notification_service", "title": "CMD_BACKUP", "msg": str(exc)}},
+                    )
+                if backup_url:
+                    self._send(
+                        title="LOG BACKUP READY",
+                        message=f"komut: {command}\nlink: {backup_url}",
+                        priority=3,
+                        tags="link",
+                    )
+                    continue
             total = len(files)
             upload_error: str | None = None
             for idx, file_path in enumerate(files, start=1):

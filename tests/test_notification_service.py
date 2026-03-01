@@ -330,6 +330,34 @@ def test_notification_service_handles_logs_command_and_uploads_bundle(tmp_path) 
     assert saved.get("last_command_time") is not None
 
 
+def test_notification_service_uses_backup_link_when_available(tmp_path) -> None:
+    now = datetime(2026, 2, 27, 11, 31, tzinfo=UTC)
+    notifier = _FakeNtfyClient()
+    notifier.command_messages = [{"id": "abc123", "time": 1772350000, "message": "log-all"}]
+    service = NotificationService(
+        notifier=notifier,
+        logger=_logger(),
+        now_fn=lambda: now,
+    )
+    archive = tmp_path / "ntfy_analysis_test.zip.part001"
+    archive.write_bytes(b"test")
+
+    def _publish(cmd: str, files: list[Path]) -> str | None:
+        assert cmd == "log-all"
+        assert len(files) == 1
+        return "https://github.com/rburakdur/backup/blob/main/rbdcrypt-logs/20260227/test.zip"
+
+    service.process_ntfy_commands(
+        export_logs_bundle=lambda _cmd: [archive],
+        publish_logs_bundle=_publish,
+    )
+
+    assert len(notifier.upload_calls) == 0
+    assert len(notifier.calls) == 1
+    assert notifier.calls[0]["title"] == "LOG BACKUP READY"
+    assert "https://github.com/rburakdur/backup/blob/main/" in str(notifier.calls[0]["message"])
+
+
 def test_notification_service_sends_fallback_message_when_log_upload_fails(tmp_path) -> None:
     now = datetime(2026, 2, 27, 11, 31, tzinfo=UTC)
     notifier = _FakeNtfyClient()

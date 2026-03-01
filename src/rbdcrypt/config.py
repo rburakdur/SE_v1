@@ -181,6 +181,26 @@ class NotificationSettings(BaseModel):
         validation_alias=AliasChoices("command_topic", "ntfy_command_topic"),
     )
     timeout_sec: float = 4.0
+    log_backup_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("log_backup_enabled", "ntfy_log_backup_enabled"),
+    )
+    log_backup_repo_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("log_backup_repo_url", "ntfy_log_backup_repo_url"),
+    )
+    log_backup_repo_branch: str = Field(
+        default="main",
+        validation_alias=AliasChoices("log_backup_repo_branch", "ntfy_log_backup_repo_branch"),
+    )
+    log_backup_clone_dir: Path = Field(
+        default=Path("bot_data/backup_repo"),
+        validation_alias=AliasChoices("log_backup_clone_dir", "ntfy_log_backup_clone_dir"),
+    )
+    log_backup_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("log_backup_base_url", "ntfy_log_backup_base_url"),
+    )
     detail_level: Literal["compact", "detailed"] = "detailed"
     auto_signal_top_n: int = 5
     notify_on_cycle_summary: bool = False

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import shutil
 import sqlite3
+import subprocess
 import time
 import traceback
 from dataclasses import dataclass
@@ -76,6 +78,7 @@ class RuntimeWorker:
                 )
                 self.runtime.notification_service.process_ntfy_commands(
                     export_logs_bundle=self._export_logs_bundle,
+                    publish_logs_bundle=self._publish_logs_bundle if self.runtime.settings.notifications.log_backup_enabled else None,
                 )
                 return
             except Exception as exc:
@@ -239,6 +242,109 @@ class RuntimeWorker:
                 part_paths.append(part_path)
                 part_idx += 1
         return part_paths
+
+    def _publish_logs_bundle(self, command: str, files: list[Path]) -> str | None:
+        cfg = self.runtime.settings.notifications
+        repo_url = (cfg.log_backup_repo_url or "").strip()
+        if not repo_url:
+            return None
+        archive_path = self._resolve_archive_path(files)
+        if archive_path is None or not archive_path.is_file():
+            return None
+        clone_dir = cfg.log_backup_clone_dir
+        if not clone_dir.is_absolute():
+            clone_dir = self.runtime.settings.data_dir / clone_dir
+        branch = cfg.log_backup_repo_branch.strip() or "main"
+        self._prepare_backup_repo(clone_dir=clone_dir, repo_url=repo_url, branch=branch)
+        ts = self._extract_archive_stamp(archive_path.name) or self.runtime.clock.now().astimezone(UTC).strftime("%Y%m%d_%H%M%S")
+        rel_dst = Path("rbdcrypt-logs") / ts / archive_path.name
+        abs_dst = clone_dir / rel_dst
+        abs_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(archive_path, abs_dst)
+        self._git_run(clone_dir, "git", "add", rel_dst.as_posix())
+        changed = self._git_run(clone_dir, "git", "diff", "--cached", "--quiet", check=False)
+        if changed.returncode == 0:
+            return self._build_backup_url(
+                repo_url=repo_url,
+                branch=branch,
+                rel_path=rel_dst,
+                base_url=cfg.log_backup_base_url,
+            )
+        commit_msg = f"rbdcrypt {command} export {ts}"
+        self._git_run(clone_dir, "git", "commit", "-m", commit_msg)
+        self._git_run(clone_dir, "git", "push", "origin", branch)
+        return self._build_backup_url(
+            repo_url=repo_url,
+            branch=branch,
+            rel_path=rel_dst,
+            base_url=cfg.log_backup_base_url,
+        )
+
+    def _prepare_backup_repo(self, *, clone_dir: Path, repo_url: str, branch: str) -> None:
+        if not (clone_dir / ".git").is_dir():
+            clone_dir.parent.mkdir(parents=True, exist_ok=True)
+            self._git_run(clone_dir.parent, "git", "clone", "--branch", branch, "--single-branch", repo_url, str(clone_dir))
+        else:
+            self._git_run(clone_dir, "git", "remote", "set-url", "origin", repo_url)
+            self._git_run(clone_dir, "git", "fetch", "origin", branch)
+            self._git_run(clone_dir, "git", "checkout", branch)
+            self._git_run(clone_dir, "git", "pull", "--ff-only", "origin", branch)
+
+    @staticmethod
+    def _resolve_archive_path(files: list[Path]) -> Path | None:
+        for file_path in files:
+            if file_path.suffix.lower() == ".zip" and file_path.is_file():
+                return file_path
+            match = re.search(r"(.+\.zip)\.part\d{3}$", file_path.name)
+            if match:
+                archive = file_path.with_name(match.group(1))
+                if archive.is_file():
+                    return archive
+        return None
+
+    @staticmethod
+    def _extract_archive_stamp(name: str) -> str | None:
+        match = re.search(r"(\d{8}_\d{6})", name)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _build_backup_url(*, repo_url: str, branch: str, rel_path: Path, base_url: str | None) -> str | None:
+        base = (base_url or "").strip().rstrip("/")
+        if not base:
+            base = RuntimeWorker._github_repo_https(repo_url) or ""
+        if not base:
+            return None
+        return f"{base}/blob/{branch}/{rel_path.as_posix()}"
+
+    @staticmethod
+    def _github_repo_https(repo_url: str) -> str | None:
+        text = repo_url.strip()
+        if text.startswith("git@github.com:"):
+            path = text.removeprefix("git@github.com:")
+        elif text.startswith("https://github.com/"):
+            path = text.removeprefix("https://github.com/")
+        else:
+            return None
+        if path.endswith(".git"):
+            path = path[:-4]
+        path = path.strip("/")
+        if not path:
+            return None
+        return f"https://github.com/{path}"
+
+    @staticmethod
+    def _git_run(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        proc = subprocess.run(
+            list(args),
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if check and proc.returncode != 0:
+            msg = proc.stderr.strip() or proc.stdout.strip() or "git command failed"
+            raise RuntimeError(msg)
+        return proc
 
     def _export_db_csvs(
         self,

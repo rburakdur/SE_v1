@@ -44,3 +44,10 @@ def test_split_for_ntfy_upload_splits_large_archive_and_preserves_bytes(tmp_path
     assert all(p.stat().st_size <= 200 for p in parts)
     rebuilt = b"".join(part.read_bytes() for part in parts)
     assert rebuilt == payload
+
+
+def test_github_repo_https_builder_handles_ssh_and_https() -> None:
+    ssh_url = RuntimeWorker._github_repo_https("git@github.com:rburakdur/backup.git")
+    https_url = RuntimeWorker._github_repo_https("https://github.com/rburakdur/backup.git")
+    assert ssh_url == "https://github.com/rburakdur/backup"
+    assert https_url == "https://github.com/rburakdur/backup"
