@@ -13,6 +13,7 @@ from .ntfy_client import NtfyClient
 
 STATE_KEY = "notifications_state"
 CMD_LAST_ID_KEY = "last_command_id"
+CMD_LAST_TOPIC_KEY = "last_command_topic"
 
 SUMMARY_EMOJI = "\U0001F4CA"
 ERROR_EMOJI = "\u26A0\ufe0f"
@@ -278,6 +279,9 @@ class NotificationService:
         if not command_topic:
             return
         since = self._load_state_value(CMD_LAST_ID_KEY)
+        last_topic = self._load_state_value(CMD_LAST_TOPIC_KEY)
+        if last_topic and last_topic != command_topic:
+            since = None
         try:
             messages = self.notifier.fetch_messages(topic=command_topic, since=since)
         except Exception as exc:
@@ -314,6 +318,7 @@ class NotificationService:
                 )
         if last_id and last_id != since:
             self._save_state_value(CMD_LAST_ID_KEY, last_id)
+        self._save_state_value(CMD_LAST_TOPIC_KEY, command_topic)
 
     def _maybe_send_summary(
         self,

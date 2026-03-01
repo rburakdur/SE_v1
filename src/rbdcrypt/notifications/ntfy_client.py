@@ -52,7 +52,7 @@ class NtfyClient:
     ) -> list[dict[str, object]]:
         if not self.config.enabled or not self.config.ntfy_url or not topic:
             return []
-        params: dict[str, str] = {"poll": "0", "since": since or "2m"}
+        params: dict[str, str] = {"poll": "0", "since": since or "30s"}
         resp = self.session.get(
             f"{self._topic_url(topic)}/json",
             params=params,

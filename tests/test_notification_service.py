@@ -326,6 +326,7 @@ def test_notification_service_handles_logs_command_and_uploads_bundle(tmp_path) 
     assert seen == ["log"]
     saved = state.get_json("notifications_state") or {}
     assert saved.get("last_command_id") == "abc123"
+    assert saved.get("last_command_topic") == "RBD-CRYPT-cmd"
 
 
 def test_ntfy_prefixed_env_keys_are_supported(monkeypatch) -> None:
