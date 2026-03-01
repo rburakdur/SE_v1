@@ -201,6 +201,10 @@ class NotificationSettings(BaseModel):
         default=None,
         validation_alias=AliasChoices("log_backup_base_url", "ntfy_log_backup_base_url"),
     )
+    log_backup_prefer_7z: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("log_backup_prefer_7z", "ntfy_log_backup_prefer_7z"),
+    )
     detail_level: Literal["compact", "detailed"] = "detailed"
     auto_signal_top_n: int = 5
     notify_on_cycle_summary: bool = False

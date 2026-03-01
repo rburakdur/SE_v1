@@ -63,3 +63,23 @@ def test_db_export_specs_differs_for_log_and_log_all() -> None:
     assert "ohlcv_futures" in log_all_tables
     assert any(name == "signals" and limit == 2000 for name, _time_col, limit in log_specs)
     assert any(name == "signals" and limit is None for name, _time_col, limit in log_all_specs)
+
+
+def test_cleanup_export_bundle_removes_archive_parts_and_export_dir(tmp_path) -> None:
+    worker = _new_worker()
+    archive = tmp_path / "ntfy_log_20260227_120000.zip"
+    archive.write_bytes(b"zip")
+    part = tmp_path / "ntfy_log_20260227_120000.zip.part001"
+    part.write_bytes(b"part")
+    seven = tmp_path / "ntfy_log_20260227_120000.7z"
+    seven.write_bytes(b"7z")
+    export_dir = tmp_path / "ntfy_log_20260227_120000"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    (export_dir / "meta.json").write_text("{}", encoding="utf-8")
+
+    RuntimeWorker._cleanup_export_bundle(worker, [part])
+
+    assert not archive.exists()
+    assert not part.exists()
+    assert not seven.exists()
+    assert not export_dir.exists()

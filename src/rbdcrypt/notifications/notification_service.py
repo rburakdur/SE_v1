@@ -269,6 +269,7 @@ class NotificationService:
         *,
         export_logs_bundle: Callable[[str], list[Path]],
         publish_logs_bundle: Callable[[str, list[Path]], str | None] | None = None,
+        cleanup_logs_bundle: Callable[[list[Path]], None] | None = None,
     ) -> None:
         if self.notifier is None:
             return
@@ -320,57 +321,68 @@ class NotificationService:
                 command = "log"
             if command not in {"log", "log-all"}:
                 continue
-            files = export_logs_bundle(command)
-            if publish_logs_bundle is not None:
-                try:
-                    backup_url = publish_logs_bundle(command, files)
-                except Exception as exc:
-                    backup_url = None
-                    self.logger.error(
-                        "ntfy_error",
-                        extra={"event": {"source": "notification_service", "title": "CMD_BACKUP", "msg": str(exc)}},
-                    )
-                if backup_url:
+            files: list[Path] = []
+            try:
+                files = export_logs_bundle(command)
+                if publish_logs_bundle is not None:
+                    try:
+                        backup_url = publish_logs_bundle(command, files)
+                    except Exception as exc:
+                        backup_url = None
+                        self.logger.error(
+                            "ntfy_error",
+                            extra={"event": {"source": "notification_service", "title": "CMD_BACKUP", "msg": str(exc)}},
+                        )
+                    if backup_url:
+                        self._send(
+                            title="LOG BACKUP READY",
+                            message=f"komut: {command}\nlink: {backup_url}",
+                            priority=3,
+                            tags="link",
+                        )
+                        continue
+                total = len(files)
+                upload_error: str | None = None
+                for idx, file_path in enumerate(files, start=1):
+                    try:
+                        self.notifier.upload_file(
+                            title=f"LOGS ARCHIVE {idx}/{total}",
+                            file_path=file_path,
+                            message=f"komut: {command} | dosya: {file_path.name} | parca: {idx}/{total}",
+                            priority=3,
+                            tags="file_folder",
+                        )
+                    except Exception as exc:
+                        upload_error = str(exc)
+                        self.logger.error(
+                            "ntfy_error",
+                            extra={"event": {"source": "notification_service", "title": "CMD_UPLOAD", "msg": str(exc)}},
+                        )
+                        if "413" in str(exc):
+                            break
+                if upload_error:
+                    first_file = files[0] if files else None
+                    location = str(first_file.parent if first_file is not None else "-")
+                    parts_note = f"{len(files)} parca" if files else "0 parca"
                     self._send(
-                        title="LOG BACKUP READY",
-                        message=f"komut: {command}\nlink: {backup_url}",
-                        priority=3,
-                        tags="link",
+                        title="LOG EXPORT DURUMU",
+                        message=(
+                            f"komut: {command} | attachment yuklenemedi ({upload_error})\n"
+                            f"sunucudaki klasor: {location}\n"
+                            f"hazirlanan: {parts_note}"
+                        ),
+                        priority=4,
+                        tags="warning",
                     )
-                    continue
-            total = len(files)
-            upload_error: str | None = None
-            for idx, file_path in enumerate(files, start=1):
-                try:
-                    self.notifier.upload_file(
-                        title=f"LOGS ARCHIVE {idx}/{total}",
-                        file_path=file_path,
-                        message=f"komut: {command} | dosya: {file_path.name} | parca: {idx}/{total}",
-                        priority=3,
-                        tags="file_folder",
-                    )
-                except Exception as exc:
-                    upload_error = str(exc)
-                    self.logger.error(
-                        "ntfy_error",
-                        extra={"event": {"source": "notification_service", "title": "CMD_UPLOAD", "msg": str(exc)}},
-                    )
-                    if "413" in str(exc):
-                        break
-            if upload_error:
-                first_file = files[0] if files else None
-                location = str(first_file.parent if first_file is not None else "-")
-                parts_note = f"{len(files)} parca" if files else "0 parca"
-                self._send(
-                    title="LOG EXPORT DURUMU",
-                    message=(
-                        f"komut: {command} | attachment yuklenemedi ({upload_error})\n"
-                        f"sunucudaki klasor: {location}\n"
-                        f"hazirlanan: {parts_note}"
-                    ),
-                    priority=4,
-                    tags="warning",
-                )
+            finally:
+                if cleanup_logs_bundle is not None and files:
+                    try:
+                        cleanup_logs_bundle(files)
+                    except Exception as exc:
+                        self.logger.error(
+                            "ntfy_error",
+                            extra={"event": {"source": "notification_service", "title": "CMD_CLEANUP", "msg": str(exc)}},
+                        )
         if last_id and last_id != since:
             self._save_state_value(CMD_LAST_ID_KEY, last_id)
         self._save_state_value(CMD_LAST_TOPIC_KEY, command_topic)

@@ -385,15 +385,41 @@ def test_notification_service_sends_fallback_message_when_log_upload_fails(tmp_p
     assert "sunucudaki klasor:" in message
 
 
+def test_notification_service_cleans_up_export_files_after_processing(tmp_path) -> None:
+    now = datetime(2026, 2, 27, 11, 31, tzinfo=UTC)
+    notifier = _FakeNtfyClient()
+    notifier.command_messages = [{"id": "abc123", "time": 1772350000, "message": "log"}]
+    service = NotificationService(
+        notifier=notifier,
+        logger=_logger(),
+        now_fn=lambda: now,
+    )
+    archive = tmp_path / "ntfy_analysis_test.zip"
+    archive.write_bytes(b"x")
+    cleaned: list[str] = []
+
+    def _cleanup(files: list[Path]) -> None:
+        cleaned.extend(str(p) for p in files)
+
+    service.process_ntfy_commands(
+        export_logs_bundle=lambda _cmd: [archive],
+        cleanup_logs_bundle=_cleanup,
+    )
+
+    assert cleaned == [str(archive)]
+
+
 def test_ntfy_prefixed_env_keys_are_supported(monkeypatch) -> None:
     monkeypatch.delenv("NOTIFICATIONS__ENABLED", raising=False)
     monkeypatch.delenv("NOTIFICATIONS__TOPIC", raising=False)
     monkeypatch.setenv("NOTIFICATIONS__NTFY_ENABLED", "true")
     monkeypatch.setenv("NOTIFICATIONS__NTFY_TOPIC", "RBD-CRYPT")
     monkeypatch.setenv("NOTIFICATIONS__NTFY_URL", "https://ntfy.sh")
+    monkeypatch.setenv("NOTIFICATIONS__NTFY_LOG_BACKUP_PREFER_7Z", "true")
 
     settings = AppSettings(_env_file=None)
 
     assert settings.notifications.enabled is True
     assert settings.notifications.topic == "RBD-CRYPT"
     assert settings.notifications.ntfy_url == "https://ntfy.sh"
+    assert settings.notifications.log_backup_prefer_7z is True

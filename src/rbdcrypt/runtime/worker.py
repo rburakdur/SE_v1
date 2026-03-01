@@ -79,6 +79,7 @@ class RuntimeWorker:
                 self.runtime.notification_service.process_ntfy_commands(
                     export_logs_bundle=self._export_logs_bundle,
                     publish_logs_bundle=self._publish_logs_bundle if self.runtime.settings.notifications.log_backup_enabled else None,
+                    cleanup_logs_bundle=self._cleanup_export_bundle,
                 )
                 return
             except Exception as exc:
@@ -252,16 +253,20 @@ class RuntimeWorker:
         archive_path = self._resolve_archive_path(files)
         if archive_path is None or not archive_path.is_file():
             return None
+        backup_archive = self._prepare_backup_archive(
+            archive_path=archive_path,
+            prefer_7z=bool(cfg.log_backup_prefer_7z),
+        )
         clone_dir = cfg.log_backup_clone_dir
         if not clone_dir.is_absolute():
             clone_dir = self.runtime.settings.data_dir / clone_dir
         branch = cfg.log_backup_repo_branch.strip() or "main"
         self._prepare_backup_repo(clone_dir=clone_dir, repo_url=repo_url, branch=branch)
-        ts = self._extract_archive_stamp(archive_path.name) or self.runtime.clock.now().astimezone(UTC).strftime("%Y%m%d_%H%M%S")
-        rel_dst = Path("rbdcrypt-logs") / ts / archive_path.name
+        ts = self._extract_archive_stamp(backup_archive.name) or self.runtime.clock.now().astimezone(UTC).strftime("%Y%m%d_%H%M%S")
+        rel_dst = Path("rbdcrypt-logs") / ts / backup_archive.name
         abs_dst = clone_dir / rel_dst
         abs_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(archive_path, abs_dst)
+        shutil.copy2(backup_archive, abs_dst)
         self._git_run(clone_dir, "git", "add", rel_dst.as_posix())
         changed = self._git_run(clone_dir, "git", "diff", "--cached", "--quiet", check=False)
         if changed.returncode == 0:
@@ -280,6 +285,31 @@ class RuntimeWorker:
             rel_path=rel_dst,
             base_url=cfg.log_backup_base_url,
         )
+
+    def _prepare_backup_archive(self, *, archive_path: Path, prefer_7z: bool) -> Path:
+        if not prefer_7z:
+            return archive_path
+        seven_bin = self._find_7z_binary()
+        if not seven_bin:
+            return archive_path
+        export_dir = archive_path.parent / archive_path.stem
+        if not export_dir.is_dir():
+            return archive_path
+        target = archive_path.with_suffix(".7z")
+        proc = subprocess.run(
+            [seven_bin, "a", "-t7z", "-mx=9", str(target), export_dir.name],
+            cwd=str(export_dir.parent),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0 or not target.is_file():
+            return archive_path
+        return target
+
+    @staticmethod
+    def _find_7z_binary() -> str | None:
+        return shutil.which("7z") or shutil.which("7za")
 
     def _prepare_backup_repo(self, *, clone_dir: Path, repo_url: str, branch: str) -> None:
         if not (clone_dir / ".git").is_dir():
@@ -346,6 +376,26 @@ class RuntimeWorker:
             msg = proc.stderr.strip() or proc.stdout.strip() or "git command failed"
             raise RuntimeError(msg)
         return proc
+
+    def _cleanup_export_bundle(self, files: list[Path]) -> None:
+        if not files:
+            return
+        archive = self._resolve_archive_path(files)
+        if archive is None:
+            return
+        candidates: set[Path] = {archive, archive.with_suffix(".7z")}
+        for candidate in list(candidates):
+            for part in candidate.parent.glob(f"{candidate.name}.part*"):
+                candidates.add(part)
+        for path in candidates:
+            try:
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        export_dir = archive.parent / archive.stem
+        if export_dir.is_dir():
+            shutil.rmtree(export_dir, ignore_errors=True)
 
     def _export_db_csvs(
         self,
