@@ -264,7 +264,7 @@ class NotificationService:
             tags="rotating_light",
         )
 
-    def process_ntfy_commands(self, *, export_logs_bundle: Callable[[str], Path]) -> None:
+    def process_ntfy_commands(self, *, export_logs_bundle: Callable[[str], list[Path]]) -> None:
         if self.notifier is None:
             return
         cfg = self.notifier.config
@@ -315,20 +315,22 @@ class NotificationService:
                 command = "log"
             if command not in {"log", "log-all"}:
                 continue
-            archive_path = export_logs_bundle(command)
-            try:
-                self.notifier.upload_file(
-                    title="LOGS ARCHIVE",
-                    file_path=archive_path,
-                    message=f"komut: {command} | dosya: {archive_path.name}",
-                    priority=3,
-                    tags="file_folder",
-                )
-            except Exception as exc:
-                self.logger.error(
-                    "ntfy_error",
-                    extra={"event": {"source": "notification_service", "title": "CMD_UPLOAD", "msg": str(exc)}},
-                )
+            files = export_logs_bundle(command)
+            total = len(files)
+            for idx, file_path in enumerate(files, start=1):
+                try:
+                    self.notifier.upload_file(
+                        title=f"LOGS ARCHIVE {idx}/{total}",
+                        file_path=file_path,
+                        message=f"komut: {command} | dosya: {file_path.name} | parca: {idx}/{total}",
+                        priority=3,
+                        tags="file_folder",
+                    )
+                except Exception as exc:
+                    self.logger.error(
+                        "ntfy_error",
+                        extra={"event": {"source": "notification_service", "title": "CMD_UPLOAD", "msg": str(exc)}},
+                    )
         if last_id and last_id != since:
             self._save_state_value(CMD_LAST_ID_KEY, last_id)
         self._save_state_value(CMD_LAST_TOPIC_KEY, command_topic)

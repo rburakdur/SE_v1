@@ -162,7 +162,7 @@ class RuntimeWorker:
         snapshots.sort(key=lambda p: p.hold_minutes, reverse=True)
         return snapshots
 
-    def _export_logs_bundle(self, command: str) -> Path:
+    def _export_logs_bundle(self, command: str) -> list[Path]:
         now = self.runtime.clock.now().astimezone(UTC)
         ts = now.strftime("%Y%m%d_%H%M%S")
         command_norm = command.strip().lower() if command else "log"
@@ -170,6 +170,7 @@ class RuntimeWorker:
         export_dir = export_root / f"ntfy_{command_norm}_{ts}"
         export_dir.mkdir(parents=True, exist_ok=True)
         start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        upload_files: list[Path] = []
         logs_dir = export_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         base_name = self.runtime.settings.logging.log_file
@@ -180,7 +181,9 @@ class RuntimeWorker:
         if command_norm == "log-all":
             for src in log_files:
                 if src.is_file():
-                    shutil.copy2(src, logs_dir / src.name)
+                    dst = logs_dir / src.name
+                    shutil.copy2(src, dst)
+                    upload_files.append(dst)
         else:
             out_file = logs_dir / "log_recent_2days.jsonl"
             with out_file.open("w", encoding="utf-8") as out:
@@ -194,22 +197,28 @@ class RuntimeWorker:
                                 continue
                             if start <= ts_line <= now:
                                 out.write(line)
-        self._export_db_csvs(
+            upload_files.append(out_file)
+        db_files = self._export_db_csvs(
             export_dir=export_dir,
             command_norm=command_norm,
             start=start,
             end=now,
         )
+        upload_files.extend(db_files)
         meta = {
             "generated_at_utc": now.isoformat(),
             "command": command_norm,
             "topic": self.runtime.settings.notifications.topic,
         }
-        (export_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        meta_path = export_dir / "meta.json"
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        upload_files.insert(0, meta_path)
+        if command_norm == "log-all":
+            return upload_files
         archive_path = export_root / f"ntfy_{command_norm}_{ts}.tar.gz"
         with tarfile.open(archive_path, mode="w:gz") as tf:
             tf.add(export_dir, arcname=export_dir.name)
-        return archive_path
+        return [archive_path]
 
     def _export_db_csvs(
         self,
@@ -218,9 +227,10 @@ class RuntimeWorker:
         command_norm: str,
         start: datetime,
         end: datetime,
-    ) -> None:
+    ) -> list[Path]:
         db_dir = export_dir / "db"
         db_dir.mkdir(parents=True, exist_ok=True)
+        generated: list[Path] = []
         tables: list[tuple[str, str | None]] = [
             ("signals", "created_at"),
             ("signal_decisions", "created_at"),
@@ -236,22 +246,73 @@ class RuntimeWorker:
         conn.row_factory = sqlite3.Row
         try:
             for table, time_col in tables:
-                out_path = db_dir / f"{table}.csv"
                 sql = f"SELECT * FROM {table}"
                 params: tuple[str, ...] = ()
                 if command_norm != "log-all" and time_col is not None:
                     sql += f" WHERE {time_col} >= ? AND {time_col} <= ? ORDER BY {time_col} ASC"
                     params = (start.isoformat(), end.isoformat())
-                cur = conn.execute(sql, params)
-                rows = cur.fetchall()
-                fieldnames = [d[0] for d in cur.description or []]
-                with out_path.open("w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    for row in rows:
-                        writer.writerow(dict(row))
+                elif time_col is not None:
+                    sql += f" ORDER BY {time_col} ASC"
+                if command_norm == "log-all" and table == "ohlcv_futures":
+                    generated.extend(self._export_query_csv_chunks(conn=conn, sql=sql, params=params, out_dir=db_dir, stem=table))
+                    continue
+                out_path = db_dir / f"{table}.csv"
+                self._export_query_csv(conn=conn, sql=sql, params=params, out_path=out_path)
+                generated.append(out_path)
         finally:
             conn.close()
+        return generated
+
+    @staticmethod
+    def _export_query_csv(
+        *,
+        conn: sqlite3.Connection,
+        sql: str,
+        params: tuple[str, ...],
+        out_path: Path,
+    ) -> None:
+        cur = conn.execute(sql, params)
+        rows = cur.fetchall()
+        fieldnames = [d[0] for d in cur.description or []]
+        with out_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(dict(row))
+
+    @staticmethod
+    def _export_query_csv_chunks(
+        *,
+        conn: sqlite3.Connection,
+        sql: str,
+        params: tuple[str, ...],
+        out_dir: Path,
+        stem: str,
+        chunk_rows: int = 25000,
+    ) -> list[Path]:
+        cur = conn.execute(sql, params)
+        fieldnames = [d[0] for d in cur.description or []]
+        parts: list[Path] = []
+        part_idx = 1
+        while True:
+            rows = cur.fetchmany(chunk_rows)
+            if not rows:
+                break
+            out_path = out_dir / f"{stem}_part{part_idx:03d}.csv"
+            with out_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(dict(row))
+            parts.append(out_path)
+            part_idx += 1
+        if not parts:
+            empty_path = out_dir / f"{stem}.csv"
+            with empty_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+            parts.append(empty_path)
+        return parts
 
     @staticmethod
     def _parse_log_time(line: str) -> datetime | None:
