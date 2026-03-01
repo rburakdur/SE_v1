@@ -298,7 +298,7 @@ def test_notification_service_formats_exit_title_and_status() -> None:
 def test_notification_service_handles_logs_command_and_uploads_bundle(tmp_path) -> None:
     now = datetime(2026, 2, 27, 11, 31, tzinfo=UTC)
     notifier = _FakeNtfyClient()
-    notifier.command_messages = [{"id": "abc123", "message": "logs"}]
+    notifier.command_messages = [{"id": "abc123", "time": 1772350000, "message": "logs"}]
     state = _FakeStateStore()
     service = NotificationService(
         notifier=notifier,
@@ -327,6 +327,7 @@ def test_notification_service_handles_logs_command_and_uploads_bundle(tmp_path) 
     saved = state.get_json("notifications_state") or {}
     assert saved.get("last_command_id") == "abc123"
     assert saved.get("last_command_topic") == "RBD-CRYPT-cmd"
+    assert saved.get("last_command_time") is not None
 
 
 def test_ntfy_prefixed_env_keys_are_supported(monkeypatch) -> None:

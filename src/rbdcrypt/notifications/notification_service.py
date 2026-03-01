@@ -14,6 +14,7 @@ from .ntfy_client import NtfyClient
 STATE_KEY = "notifications_state"
 CMD_LAST_ID_KEY = "last_command_id"
 CMD_LAST_TOPIC_KEY = "last_command_topic"
+CMD_LAST_TIME_KEY = "last_command_time"
 
 SUMMARY_EMOJI = "\U0001F4CA"
 ERROR_EMOJI = "\u26A0\ufe0f"
@@ -282,8 +283,13 @@ class NotificationService:
         last_topic = self._load_state_value(CMD_LAST_TOPIC_KEY)
         if last_topic and last_topic != command_topic:
             since = None
+        last_time_raw = self._load_state_value(CMD_LAST_TIME_KEY)
         try:
-            messages = self.notifier.fetch_messages(topic=command_topic, since=since)
+            last_time = int(last_time_raw) if last_time_raw is not None else 0
+        except ValueError:
+            last_time = 0
+        try:
+            messages = self.notifier.fetch_messages(topic=command_topic, since="45s")
         except Exception as exc:
             self.logger.error(
                 "ntfy_error",
@@ -293,10 +299,17 @@ class NotificationService:
         if not messages:
             return
         last_id = since
+        newest_time = last_time
         for msg in messages:
+            msg_time_raw = msg.get("time")
+            msg_time = int(msg_time_raw) if isinstance(msg_time_raw, int | float) else 0
+            if msg_time and msg_time <= last_time:
+                continue
             msg_id = str(msg.get("id") or "").strip()
             if msg_id:
                 last_id = msg_id
+            if msg_time > newest_time:
+                newest_time = msg_time
             command = str(msg.get("message") or "").strip().lower()
             if command == "logs":
                 command = "log"
@@ -319,6 +332,8 @@ class NotificationService:
         if last_id and last_id != since:
             self._save_state_value(CMD_LAST_ID_KEY, last_id)
         self._save_state_value(CMD_LAST_TOPIC_KEY, command_topic)
+        if newest_time > last_time:
+            self._save_state_value(CMD_LAST_TIME_KEY, str(newest_time))
 
     def _maybe_send_summary(
         self,
