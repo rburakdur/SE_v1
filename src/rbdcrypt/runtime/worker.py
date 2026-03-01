@@ -20,8 +20,8 @@ from .app import RuntimeContainer
 @dataclass(slots=True)
 class RuntimeWorker:
     runtime: RuntimeContainer
-    _MAX_NTFY_UPLOAD_BYTES = 10 * 1024 * 1024
-    _UPLOAD_CHUNK_BYTES = 9 * 1024 * 1024
+    _MAX_NTFY_UPLOAD_BYTES = 2 * 1024 * 1024
+    _UPLOAD_CHUNK_BYTES = 1800 * 1024
 
     def run(self, *, one_shot: bool = False, max_iterations: int | None = None) -> None:
         scheduler = IntervalScheduler(interval_sec=self.runtime.settings.runtime.scan_interval_sec)
