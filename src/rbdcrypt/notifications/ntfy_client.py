@@ -56,7 +56,7 @@ class NtfyClient:
         resp = self.session.get(
             f"{self._topic_url(topic)}/json",
             params=params,
-            timeout=self.config.timeout_sec,
+            timeout=max(self.config.timeout_sec, 15.0),
         )
         resp.raise_for_status()
         items: list[dict[str, object]] = []
