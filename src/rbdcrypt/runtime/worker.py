@@ -174,7 +174,7 @@ class RuntimeWorker:
         export_root = self.runtime.settings.data_dir / "exports"
         export_dir = export_root / f"ntfy_{command_norm}_{ts}"
         export_dir.mkdir(parents=True, exist_ok=True)
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        start = now - timedelta(hours=24)
         logs_dir = export_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         base_name = self.runtime.settings.logging.log_file
@@ -188,7 +188,7 @@ class RuntimeWorker:
                     dst = logs_dir / src.name
                     shutil.copy2(src, dst)
         else:
-            out_file = logs_dir / "log_recent_2days.jsonl"
+            out_file = logs_dir / "log_recent_24h.jsonl"
             with out_file.open("w", encoding="utf-8") as out:
                 for src in log_files:
                     if not src.is_file():
@@ -210,6 +210,7 @@ class RuntimeWorker:
             "generated_at_utc": now.isoformat(),
             "command": command_norm,
             "topic": self.runtime.settings.notifications.topic,
+            "window_hours": 24 if command_norm != "log-all" else None,
         }
         meta_path = export_dir / "meta.json"
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -357,28 +358,32 @@ class RuntimeWorker:
         db_dir = export_dir / "db"
         db_dir.mkdir(parents=True, exist_ok=True)
         generated: list[Path] = []
-        tables: list[tuple[str, str | None]] = [
-            ("signals", "created_at"),
-            ("signal_decisions", "created_at"),
-            ("market_context", "fetched_at"),
-            ("positions_active", None),
-            ("trades_closed", "closed_at"),
-            ("errors", "created_at"),
-            ("heartbeats", "created_at"),
-            ("runtime_state", None),
-            ("ohlcv_futures", "open_time"),
-        ]
+        tables = self._db_export_specs(command_norm)
         conn = sqlite3.connect(str(self.runtime.settings.storage.db_path))
         conn.row_factory = sqlite3.Row
         try:
-            for table, time_col in tables:
-                sql = f"SELECT * FROM {table}"
-                params: tuple[str, ...] = ()
-                if command_norm != "log-all" and time_col is not None:
-                    sql += f" WHERE {time_col} >= ? AND {time_col} <= ? ORDER BY {time_col} ASC"
+            for table, time_col, row_limit in tables:
+                params: tuple[object, ...]
+                if time_col is None:
+                    sql = f"SELECT * FROM {table}"
+                    params = ()
+                    if row_limit is not None:
+                        sql += " LIMIT ?"
+                        params = (row_limit,)
+                elif command_norm == "log-all":
+                    sql = f"SELECT * FROM {table} ORDER BY {time_col} ASC"
+                    params = ()
+                elif row_limit is not None:
+                    sql = (
+                        f"SELECT * FROM ("
+                        f"SELECT * FROM {table} WHERE {time_col} >= ? AND {time_col} <= ? "
+                        f"ORDER BY {time_col} DESC LIMIT ?"
+                        f") ORDER BY {time_col} ASC"
+                    )
+                    params = (start.isoformat(), end.isoformat(), row_limit)
+                else:
+                    sql = f"SELECT * FROM {table} WHERE {time_col} >= ? AND {time_col} <= ? ORDER BY {time_col} ASC"
                     params = (start.isoformat(), end.isoformat())
-                elif time_col is not None:
-                    sql += f" ORDER BY {time_col} ASC"
                 if command_norm == "log-all" and table == "ohlcv_futures":
                     generated.extend(self._export_query_csv_chunks(conn=conn, sql=sql, params=params, out_dir=db_dir, stem=table))
                     continue
@@ -390,11 +395,37 @@ class RuntimeWorker:
         return generated
 
     @staticmethod
+    def _db_export_specs(command_norm: str) -> list[tuple[str, str | None, int | None]]:
+        if command_norm == "log-all":
+            return [
+                ("signals", "created_at", None),
+                ("signal_decisions", "created_at", None),
+                ("market_context", "fetched_at", None),
+                ("positions_active", None, None),
+                ("trades_closed", "closed_at", None),
+                ("errors", "created_at", None),
+                ("heartbeats", "created_at", None),
+                ("runtime_state", None, None),
+                ("ohlcv_futures", "open_time", None),
+            ]
+        # Lightweight command export: keep it compact for quick diagnostics.
+        return [
+            ("trades_closed", "closed_at", 5000),
+            ("signals", "created_at", 2000),
+            ("signal_decisions", "created_at", 2000),
+            ("market_context", "fetched_at", 2000),
+            ("errors", "created_at", 5000),
+            ("heartbeats", "created_at", 5000),
+            ("positions_active", None, None),
+            ("runtime_state", None, None),
+        ]
+
+    @staticmethod
     def _export_query_csv(
         *,
         conn: sqlite3.Connection,
         sql: str,
-        params: tuple[str, ...],
+        params: tuple[object, ...],
         out_path: Path,
     ) -> None:
         cur = conn.execute(sql, params)
@@ -411,7 +442,7 @@ class RuntimeWorker:
         *,
         conn: sqlite3.Connection,
         sql: str,
-        params: tuple[str, ...],
+        params: tuple[object, ...],
         out_dir: Path,
         stem: str,
         chunk_rows: int = 25000,

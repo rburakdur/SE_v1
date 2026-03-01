@@ -51,3 +51,15 @@ def test_github_repo_https_builder_handles_ssh_and_https() -> None:
     https_url = RuntimeWorker._github_repo_https("https://github.com/rburakdur/backup.git")
     assert ssh_url == "https://github.com/rburakdur/backup"
     assert https_url == "https://github.com/rburakdur/backup"
+
+
+def test_db_export_specs_differs_for_log_and_log_all() -> None:
+    log_specs = RuntimeWorker._db_export_specs("log")
+    log_all_specs = RuntimeWorker._db_export_specs("log-all")
+    log_tables = {name for name, _time_col, _limit in log_specs}
+    log_all_tables = {name for name, _time_col, _limit in log_all_specs}
+
+    assert "ohlcv_futures" not in log_tables
+    assert "ohlcv_futures" in log_all_tables
+    assert any(name == "signals" and limit == 2000 for name, _time_col, limit in log_specs)
+    assert any(name == "signals" and limit is None for name, _time_col, limit in log_all_specs)
