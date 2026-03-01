@@ -154,7 +154,7 @@ NOTIFICATIONS__NTFY_ENABLED=true
 NOTIFICATIONS__NTFY_URL=https://ntfy.sh
 NOTIFICATIONS__NTFY_TOPIC=<senin_topic_adin>
 NOTIFICATIONS__NTFY_COMMAND_ENABLED=true
-NOTIFICATIONS__NTFY_COMMAND_TOPIC=<senin_topic_adin>-cmd
+NOTIFICATIONS__NTFY_COMMAND_TOPIC=<senin_topic_adin>
 NOTIFICATIONS__NOTIFY_ON_OPEN=true
 NOTIFICATIONS__NOTIFY_ON_CLOSE=true
 NOTIFICATIONS__NOTIFY_ON_SCAN_DEGRADED=true
@@ -170,8 +170,10 @@ Aktif eventler:
 - runtime/trade kritik hataları
 
 Ntfy komut modu:
-- `NOTIFICATIONS__NTFY_COMMAND_ENABLED=true` ise bot `<topic>-cmd` kanalını dinler.
-- `logs` mesajı gönderildiğinde bot CSV + log export paketini üretip ana topic'e dosya olarak geri yollar.
+- `NOTIFICATIONS__NTFY_COMMAND_ENABLED=true` ise bot command mesajlarını dinler (varsayılan aynı topic).
+- `log` mesajı: sadece dünü + bugünü (şu ana kadar) içeren log paketi.
+- `log-all` mesajı: tüm mevcut log dosyaları.
+- Bot aynı topic'e dosya eki olarak geri yanıt verir.
 
 ## State Güvenliği / Persistence
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import shutil
 import tarfile
 import time
 import traceback
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ..core.scheduler import IntervalScheduler
@@ -159,36 +160,72 @@ class RuntimeWorker:
         snapshots.sort(key=lambda p: p.hold_minutes, reverse=True)
         return snapshots
 
-    def _export_logs_bundle(self) -> Path:
+    def _export_logs_bundle(self, command: str) -> Path:
         now = self.runtime.clock.now().astimezone(UTC)
         ts = now.strftime("%Y%m%d_%H%M%S")
+        command_norm = command.strip().lower() if command else "log"
         export_root = self.runtime.settings.data_dir / "exports"
-        export_dir = export_root / f"ntfy_analysis_{ts}"
+        export_dir = export_root / f"ntfy_{command_norm}_{ts}"
         export_dir.mkdir(parents=True, exist_ok=True)
-
-        tables = [
-            "signals",
-            "signal_decisions",
-            "market_context",
-            "positions_active",
-            "trades_closed",
-            "errors",
-            "heartbeats",
-            "runtime_state",
-        ]
-        for table in tables:
-            self.runtime.repos.maintenance.export_csv(
-                table=table,
-                out_path=export_dir / f"{table}.csv",
-            )
-
-        log_path = self.runtime.settings.logging.log_path
-        if log_path.is_file():
-            shutil.copy2(log_path, export_dir / log_path.name)
-        archive_path = export_root / f"ntfy_analysis_{ts}.tar.gz"
+        logs_dir = export_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        base_name = self.runtime.settings.logging.log_file
+        log_files = sorted(
+            self.runtime.settings.logging.log_dir.glob(f"{base_name}*"),
+            key=lambda p: p.name,
+        )
+        if command_norm == "log-all":
+            for src in log_files:
+                if src.is_file():
+                    shutil.copy2(src, logs_dir / src.name)
+        else:
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+            out_file = logs_dir / "log_recent_2days.jsonl"
+            with out_file.open("w", encoding="utf-8") as out:
+                for src in log_files:
+                    if not src.is_file():
+                        continue
+                    with src.open("r", encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            ts_line = self._parse_log_time(line)
+                            if ts_line is None:
+                                continue
+                            if start <= ts_line <= now:
+                                out.write(line)
+        meta = {
+            "generated_at_utc": now.isoformat(),
+            "command": command_norm,
+            "topic": self.runtime.settings.notifications.topic,
+        }
+        (export_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        archive_path = export_root / f"ntfy_{command_norm}_{ts}.tar.gz"
         with tarfile.open(archive_path, mode="w:gz") as tf:
             tf.add(export_dir, arcname=export_dir.name)
         return archive_path
+
+    @staticmethod
+    def _parse_log_time(line: str) -> datetime | None:
+        text = line.strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("ts")
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        else:
+            dt = dt.astimezone(UTC)
+        return dt
 
     @staticmethod
     def _tp_sl_targets_pct(entry: float, tp: float, sl: float, side: str) -> tuple[float, float]:

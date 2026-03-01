@@ -309,13 +309,21 @@ def test_notification_service_handles_logs_command_and_uploads_bundle(tmp_path) 
     archive = tmp_path / "ntfy_analysis_test.tar.gz"
     archive.write_bytes(b"test")
 
-    service.process_ntfy_commands(export_logs_bundle=lambda: archive)
+    seen: list[str] = []
+
+    def _export(cmd: str):
+        seen.append(cmd)
+        return archive
+
+    service.process_ntfy_commands(export_logs_bundle=_export)
 
     assert len(notifier.upload_calls) == 1
     call = notifier.upload_calls[0]
     assert call["title"] == "LOGS ARCHIVE"
     assert call["tags"] == "file_folder"
     assert call["file_path"].endswith("ntfy_analysis_test.tar.gz")
+    assert "komut: log" in str(call["message"])
+    assert seen == ["log"]
     saved = state.get_json("notifications_state") or {}
     assert saved.get("last_command_id") == "abc123"
 

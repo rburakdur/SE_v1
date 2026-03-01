@@ -262,7 +262,7 @@ class NotificationService:
             tags="rotating_light",
         )
 
-    def process_ntfy_commands(self, *, export_logs_bundle: Callable[[], Path]) -> None:
+    def process_ntfy_commands(self, *, export_logs_bundle: Callable[[str], Path]) -> None:
         if self.notifier is None:
             return
         cfg = self.notifier.config
@@ -271,7 +271,8 @@ class NotificationService:
         if cfg.command_topic:
             command_topic = cfg.command_topic.strip()
         elif cfg.topic:
-            command_topic = f"{cfg.topic}-cmd"
+            # Default command topic is the same runtime topic.
+            command_topic = cfg.topic
         else:
             command_topic = ""
         if not command_topic:
@@ -293,14 +294,16 @@ class NotificationService:
             if msg_id:
                 last_id = msg_id
             command = str(msg.get("message") or "").strip().lower()
-            if command != "logs":
+            if command == "logs":
+                command = "log"
+            if command not in {"log", "log-all"}:
                 continue
-            archive_path = export_logs_bundle()
+            archive_path = export_logs_bundle(command)
             try:
                 self.notifier.upload_file(
                     title="LOGS ARCHIVE",
                     file_path=archive_path,
-                    message=f"komut: logs | dosya: {archive_path.name}",
+                    message=f"komut: {command} | dosya: {archive_path.name}",
                     priority=3,
                     tags="file_folder",
                 )
