@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import requests
+from requests import ReadTimeout
 
 from ..config import NotificationSettings
 
@@ -52,12 +53,15 @@ class NtfyClient:
     ) -> list[dict[str, object]]:
         if not self.config.enabled or not self.config.ntfy_url or not topic:
             return []
-        params: dict[str, str] = {"since": since or "30s"}
-        resp = self.session.get(
-            f"{self._topic_url(topic)}/json",
-            params=params,
-            timeout=max(self.config.timeout_sec, 15.0),
-        )
+        params: dict[str, str] = {"poll": "1", "since": since or "30s"}
+        try:
+            resp = self.session.get(
+                f"{self._topic_url(topic)}/json",
+                params=params,
+                timeout=min(max(self.config.timeout_sec, 1.0), 2.0),
+            )
+        except ReadTimeout:
+            return []
         resp.raise_for_status()
         items: list[dict[str, object]] = []
         for line in resp.text.splitlines():
