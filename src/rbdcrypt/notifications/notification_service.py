@@ -317,6 +317,7 @@ class NotificationService:
                 continue
             files = export_logs_bundle(command)
             total = len(files)
+            upload_error: str | None = None
             for idx, file_path in enumerate(files, start=1):
                 try:
                     self.notifier.upload_file(
@@ -327,10 +328,27 @@ class NotificationService:
                         tags="file_folder",
                     )
                 except Exception as exc:
+                    upload_error = str(exc)
                     self.logger.error(
                         "ntfy_error",
                         extra={"event": {"source": "notification_service", "title": "CMD_UPLOAD", "msg": str(exc)}},
                     )
+                    if "413" in str(exc):
+                        break
+            if upload_error:
+                first_file = files[0] if files else None
+                location = str(first_file.parent if first_file is not None else "-")
+                parts_note = f"{len(files)} parca" if files else "0 parca"
+                self._send(
+                    title="LOG EXPORT DURUMU",
+                    message=(
+                        f"komut: {command} | attachment yuklenemedi ({upload_error})\n"
+                        f"sunucudaki klasor: {location}\n"
+                        f"hazirlanan: {parts_note}"
+                    ),
+                    priority=4,
+                    tags="warning",
+                )
         if last_id and last_id != since:
             self._save_state_value(CMD_LAST_ID_KEY, last_id)
         self._save_state_value(CMD_LAST_TOPIC_KEY, command_topic)

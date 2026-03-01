@@ -330,6 +330,33 @@ def test_notification_service_handles_logs_command_and_uploads_bundle(tmp_path) 
     assert saved.get("last_command_time") is not None
 
 
+def test_notification_service_sends_fallback_message_when_log_upload_fails(tmp_path) -> None:
+    now = datetime(2026, 2, 27, 11, 31, tzinfo=UTC)
+    notifier = _FakeNtfyClient()
+    notifier.command_messages = [{"id": "abc123", "time": 1772350000, "message": "log"}]
+    service = NotificationService(
+        notifier=notifier,
+        logger=_logger(),
+        now_fn=lambda: now,
+    )
+    archive = tmp_path / "ntfy_analysis_test.zip.part001"
+    archive.write_bytes(b"x" * 32)
+
+    def _upload_fail(**kwargs):  # type: ignore[no-untyped-def]
+        _ = kwargs
+        raise RuntimeError("413 Client Error: Request Entity Too Large")
+
+    notifier.upload_file = _upload_fail  # type: ignore[method-assign]
+
+    service.process_ntfy_commands(export_logs_bundle=lambda _cmd: [archive])
+
+    assert len(notifier.calls) == 1
+    assert notifier.calls[0]["title"] == "LOG EXPORT DURUMU"
+    message = str(notifier.calls[0]["message"])
+    assert "attachment yuklenemedi" in message
+    assert "sunucudaki klasor:" in message
+
+
 def test_ntfy_prefixed_env_keys_are_supported(monkeypatch) -> None:
     monkeypatch.delenv("NOTIFICATIONS__ENABLED", raising=False)
     monkeypatch.delenv("NOTIFICATIONS__TOPIC", raising=False)
