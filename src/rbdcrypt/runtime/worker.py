@@ -291,9 +291,11 @@ class RuntimeWorker:
             return archive_path
         seven_bin = self._find_7z_binary()
         if not seven_bin:
+            self.runtime.logger.info("backup_archive_fallback", extra={"event": {"format": "zip", "reason": "7z_not_found"}})
             return archive_path
         export_dir = archive_path.parent / archive_path.stem
         if not export_dir.is_dir():
+            self.runtime.logger.info("backup_archive_fallback", extra={"event": {"format": "zip", "reason": "export_dir_missing"}})
             return archive_path
         target = archive_path.with_suffix(".7z")
         proc = subprocess.run(
@@ -304,12 +306,34 @@ class RuntimeWorker:
             check=False,
         )
         if proc.returncode != 0 or not target.is_file():
+            err = (proc.stderr or proc.stdout or "").strip()
+            self.runtime.logger.error(
+                "backup_archive_error",
+                extra={
+                    "event": {
+                        "reason": "7z_failed",
+                        "returncode": proc.returncode,
+                        "msg": err[:500],
+                    }
+                },
+            )
             return archive_path
+        self.runtime.logger.info(
+            "backup_archive_ready",
+            extra={"event": {"format": "7z", "path": str(target), "size_bytes": target.stat().st_size}},
+        )
         return target
 
     @staticmethod
     def _find_7z_binary() -> str | None:
-        return shutil.which("7z") or shutil.which("7za")
+        found = shutil.which("7z") or shutil.which("7za")
+        if found:
+            return found
+        for candidate in ("/usr/bin/7z", "/usr/bin/7za"):
+            p = Path(candidate)
+            if p.is_file():
+                return str(p)
+        return None
 
     def _prepare_backup_repo(self, *, clone_dir: Path, repo_url: str, branch: str) -> None:
         if not (clone_dir / ".git").is_dir():
