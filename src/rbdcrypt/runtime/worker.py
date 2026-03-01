@@ -298,14 +298,16 @@ class RuntimeWorker:
             self.runtime.logger.info("backup_archive_fallback", extra={"event": {"format": "zip", "reason": "export_dir_missing"}})
             return archive_path
         target = archive_path.with_suffix(".7z")
+        target_abs = target.resolve()
+        cwd_abs = export_dir.parent.resolve()
         proc = subprocess.run(
-            [seven_bin, "a", "-t7z", "-mx=9", str(target), export_dir.name],
-            cwd=str(export_dir.parent),
+            [seven_bin, "a", "-t7z", "-mx=9", str(target_abs), export_dir.name],
+            cwd=str(cwd_abs),
             text=True,
             capture_output=True,
             check=False,
         )
-        if proc.returncode != 0 or not target.is_file():
+        if proc.returncode != 0 or not target_abs.is_file():
             err = (proc.stderr or proc.stdout or "").strip()
             self.runtime.logger.error(
                 "backup_archive_error",
@@ -320,9 +322,9 @@ class RuntimeWorker:
             return archive_path
         self.runtime.logger.info(
             "backup_archive_ready",
-            extra={"event": {"format": "7z", "path": str(target), "size_bytes": target.stat().st_size}},
+            extra={"event": {"format": "7z", "path": str(target_abs), "size_bytes": target_abs.stat().st_size}},
         )
-        return target
+        return target_abs
 
     @staticmethod
     def _find_7z_binary() -> str | None:
