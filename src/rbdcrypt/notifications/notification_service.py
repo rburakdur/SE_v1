@@ -289,7 +289,7 @@ class NotificationService:
         except ValueError:
             last_time = 0
         try:
-            messages = self.notifier.fetch_messages(topic=command_topic, since="45s")
+            messages = self.notifier.fetch_messages(topic=command_topic, since="5m")
         except Exception as exc:
             self.logger.error(
                 "ntfy_error",
