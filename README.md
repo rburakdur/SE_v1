@@ -171,8 +171,8 @@ Aktif eventler:
 
 Ntfy komut modu:
 - `NOTIFICATIONS__NTFY_COMMAND_ENABLED=true` ise bot command mesajlarını dinler (varsayılan aynı topic).
-- `log` mesajı: sadece dünü + bugünü (şu ana kadar) içeren log paketi.
-- `log-all` mesajı: tüm mevcut log dosyaları.
+- `log` mesajı: sadece dünü + bugünü (şu ana kadar) içeren log + DB CSV paketi.
+- `log-all` mesajı: tüm mevcut log dosyaları + DB tablolarının tam CSV dökümü.
 - Bot aynı topic'e dosya eki olarak geri yanıt verir.
 
 ## State Güvenliği / Persistence

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import csv
 import json
 import shutil
+import sqlite3
 import tarfile
 import time
 import traceback
@@ -167,6 +169,7 @@ class RuntimeWorker:
         export_root = self.runtime.settings.data_dir / "exports"
         export_dir = export_root / f"ntfy_{command_norm}_{ts}"
         export_dir.mkdir(parents=True, exist_ok=True)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
         logs_dir = export_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         base_name = self.runtime.settings.logging.log_file
@@ -179,7 +182,6 @@ class RuntimeWorker:
                 if src.is_file():
                     shutil.copy2(src, logs_dir / src.name)
         else:
-            start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
             out_file = logs_dir / "log_recent_2days.jsonl"
             with out_file.open("w", encoding="utf-8") as out:
                 for src in log_files:
@@ -192,6 +194,12 @@ class RuntimeWorker:
                                 continue
                             if start <= ts_line <= now:
                                 out.write(line)
+        self._export_db_csvs(
+            export_dir=export_dir,
+            command_norm=command_norm,
+            start=start,
+            end=now,
+        )
         meta = {
             "generated_at_utc": now.isoformat(),
             "command": command_norm,
@@ -202,6 +210,48 @@ class RuntimeWorker:
         with tarfile.open(archive_path, mode="w:gz") as tf:
             tf.add(export_dir, arcname=export_dir.name)
         return archive_path
+
+    def _export_db_csvs(
+        self,
+        *,
+        export_dir: Path,
+        command_norm: str,
+        start: datetime,
+        end: datetime,
+    ) -> None:
+        db_dir = export_dir / "db"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        tables: list[tuple[str, str | None]] = [
+            ("signals", "created_at"),
+            ("signal_decisions", "created_at"),
+            ("market_context", "fetched_at"),
+            ("positions_active", None),
+            ("trades_closed", "closed_at"),
+            ("errors", "created_at"),
+            ("heartbeats", "created_at"),
+            ("runtime_state", None),
+            ("ohlcv_futures", "open_time"),
+        ]
+        conn = sqlite3.connect(str(self.runtime.settings.storage.db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            for table, time_col in tables:
+                out_path = db_dir / f"{table}.csv"
+                sql = f"SELECT * FROM {table}"
+                params: tuple[str, ...] = ()
+                if command_norm != "log-all" and time_col is not None:
+                    sql += f" WHERE {time_col} >= ? AND {time_col} <= ? ORDER BY {time_col} ASC"
+                    params = (start.isoformat(), end.isoformat())
+                cur = conn.execute(sql, params)
+                rows = cur.fetchall()
+                fieldnames = [d[0] for d in cur.description or []]
+                with out_path.open("w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    for row in rows:
+                        writer.writerow(dict(row))
+        finally:
+            conn.close()
 
     @staticmethod
     def _parse_log_time(line: str) -> datetime | None:
