@@ -4,12 +4,12 @@ import csv
 import json
 import shutil
 import sqlite3
-import tarfile
 import time
 import traceback
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from ..core.scheduler import IntervalScheduler
 from ..models.error_event import ErrorEvent
@@ -20,6 +20,8 @@ from .app import RuntimeContainer
 @dataclass(slots=True)
 class RuntimeWorker:
     runtime: RuntimeContainer
+    _MAX_NTFY_UPLOAD_BYTES = 10 * 1024 * 1024
+    _UPLOAD_CHUNK_BYTES = 9 * 1024 * 1024
 
     def run(self, *, one_shot: bool = False, max_iterations: int | None = None) -> None:
         scheduler = IntervalScheduler(interval_sec=self.runtime.settings.runtime.scan_interval_sec)
@@ -170,7 +172,6 @@ class RuntimeWorker:
         export_dir = export_root / f"ntfy_{command_norm}_{ts}"
         export_dir.mkdir(parents=True, exist_ok=True)
         start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-        upload_files: list[Path] = []
         logs_dir = export_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         base_name = self.runtime.settings.logging.log_file
@@ -183,7 +184,6 @@ class RuntimeWorker:
                 if src.is_file():
                     dst = logs_dir / src.name
                     shutil.copy2(src, dst)
-                    upload_files.append(dst)
         else:
             out_file = logs_dir / "log_recent_2days.jsonl"
             with out_file.open("w", encoding="utf-8") as out:
@@ -197,14 +197,12 @@ class RuntimeWorker:
                                 continue
                             if start <= ts_line <= now:
                                 out.write(line)
-            upload_files.append(out_file)
-        db_files = self._export_db_csvs(
+        self._export_db_csvs(
             export_dir=export_dir,
             command_norm=command_norm,
             start=start,
             end=now,
         )
-        upload_files.extend(db_files)
         meta = {
             "generated_at_utc": now.isoformat(),
             "command": command_norm,
@@ -212,13 +210,35 @@ class RuntimeWorker:
         }
         meta_path = export_dir / "meta.json"
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        upload_files.insert(0, meta_path)
-        if command_norm == "log-all":
-            return upload_files
-        archive_path = export_root / f"ntfy_{command_norm}_{ts}.tar.gz"
-        with tarfile.open(archive_path, mode="w:gz") as tf:
-            tf.add(export_dir, arcname=export_dir.name)
-        return [archive_path]
+        archive_path = export_root / f"ntfy_{command_norm}_{ts}.zip"
+        self._create_zip_archive(source_dir=export_dir, archive_path=archive_path)
+        return self._split_for_ntfy_upload(archive_path)
+
+    @staticmethod
+    def _create_zip_archive(*, source_dir: Path, archive_path: Path) -> None:
+        with ZipFile(archive_path, mode="w", compression=ZIP_DEFLATED, compresslevel=6) as zf:
+            for item in sorted(source_dir.rglob("*")):
+                if not item.is_file():
+                    continue
+                arcname = Path(source_dir.name) / item.relative_to(source_dir)
+                zf.write(item, arcname=str(arcname).replace("\\", "/"))
+
+    def _split_for_ntfy_upload(self, archive_path: Path) -> list[Path]:
+        if archive_path.stat().st_size <= self._MAX_NTFY_UPLOAD_BYTES:
+            return [archive_path]
+        part_paths: list[Path] = []
+        with archive_path.open("rb") as src:
+            part_idx = 1
+            while True:
+                chunk = src.read(self._UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                part_path = archive_path.parent / f"{archive_path.name}.part{part_idx:03d}"
+                with part_path.open("wb") as dst:
+                    dst.write(chunk)
+                part_paths.append(part_path)
+                part_idx += 1
+        return part_paths
 
     def _export_db_csvs(
         self,
