@@ -264,7 +264,7 @@ class ScanService:
                     f"errors={error_count} scanned={len(signals)} auto={payload['auto_signals']}\n"
                     f"samples={sample_text}"
                 ),
-                priority=4,
+                priority=3,
                 tags="warning",
             )
         if (
@@ -329,7 +329,7 @@ class ScanService:
                 self._notify(
                     "rbdcrypt: scan error",
                     f"{source} {exc.__class__.__name__}: {exc}",
-                    priority=5,
+                    priority=3,
                     tags="rotating_light",
                 )
 
@@ -373,7 +373,7 @@ class ScanService:
             f"scanned={len(signals)} auto={len(auto_signals)} errors={error_count}\n"
             f"auto_long={directions.get('long', 0)} auto_short={directions.get('short', 0)}"
         )
-        self._notify("rbdcrypt: cycle summary", msg, priority=2, tags="information_source")
+        self._notify("rbdcrypt: cycle summary", msg, priority=3, tags="information_source")
 
     @staticmethod
     def _fmt(value: float | None) -> str:

@@ -426,6 +426,12 @@ def test_ntfy_prefixed_env_keys_are_supported(monkeypatch) -> None:
     assert settings.notifications.log_backup_prefer_7z is True
 
 
+def test_ntfy_max_priority_env_key_is_supported(monkeypatch) -> None:
+    monkeypatch.setenv("NOTIFICATIONS__NTFY_MAX_PRIORITY", "2")
+    settings = AppSettings(_env_file=None)
+    assert settings.notifications.max_priority == 2
+
+
 def test_ntfy_prefixed_env_keys_override_legacy_keys(monkeypatch) -> None:
     monkeypatch.setenv("NOTIFICATIONS__ENABLED", "false")
     monkeypatch.setenv("NOTIFICATIONS__TOPIC", "LEGACY-TOPIC")

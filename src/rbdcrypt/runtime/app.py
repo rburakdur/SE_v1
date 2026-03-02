@@ -102,6 +102,7 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
         extra={
             "event": {
                 "enabled": bool(notification_cfg.enabled),
+                "max_priority": int(notification_cfg.max_priority),
                 "topic": notification_cfg.topic,
                 "url": notification_cfg.ntfy_url,
                 "command_enabled": bool(notification_cfg.command_enabled),

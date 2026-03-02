@@ -28,8 +28,7 @@ class NtfyClient:
             return False
         url = self._topic_url(self.config.topic)
         headers = {"Title": title}
-        if priority is not None:
-            headers["Priority"] = str(int(priority))
+        headers["Priority"] = str(self._resolved_priority(priority))
         if tags:
             headers["Tags"] = tags
         if attach_url:
@@ -99,8 +98,7 @@ class NtfyClient:
         headers = {"Title": title, "Filename": filename or path.name}
         if message:
             headers["Message"] = message
-        if priority is not None:
-            headers["Priority"] = str(int(priority))
+        headers["Priority"] = str(self._resolved_priority(priority))
         if tags:
             headers["Tags"] = tags
         with path.open("rb") as f:
@@ -115,6 +113,12 @@ class NtfyClient:
 
     def _topic_url(self, topic: str) -> str:
         return f"{self.config.ntfy_url.rstrip('/')}/{topic}"
+
+    def _resolved_priority(self, priority: int | None) -> int:
+        base = 3 if priority is None else int(priority)
+        bounded = max(1, min(base, 5))
+        max_prio = max(1, min(int(self.config.max_priority), 5))
+        return min(bounded, max_prio)
 
     def close(self) -> None:
         self.session.close()

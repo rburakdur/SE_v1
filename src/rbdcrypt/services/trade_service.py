@@ -248,7 +248,7 @@ class TradeService:
             self._notify(
                 "rbdcrypt: recovered positions",
                 f"count={len(recovered)} symbols={','.join(sorted(p.symbol for p in recovered))}",
-                priority=4,
+                priority=3,
                 tags="warning",
             )
         return recovered
@@ -473,7 +473,7 @@ class TradeService:
                 self._notify(
                     f"rbdcrypt: closed {trade.symbol}",
                     message,
-                    priority=4,
+                    priority=3,
                     tags="moneybag" if trade.pnl_quote >= 0 else "x",
                 )
 
@@ -893,7 +893,7 @@ class TradeService:
                             self._notify(
                                 f"rbdcrypt: opened {position.symbol}",
                                 message,
-                                priority=4,
+                                priority=3,
                                 tags="chart_with_upwards_trend",
                             )
                 finally:
@@ -1302,7 +1302,7 @@ class TradeService:
             self._notify(
                 f"rbdcrypt: missed {signal.symbol}",
                 message,
-                priority=2,
+                priority=3,
                 tags="warning",
             )
 
@@ -1366,7 +1366,7 @@ class TradeService:
                 self._notify(
                     "rbdcrypt: trade error",
                     f"{source} {exc.__class__.__name__}: {exc}",
-                    priority=5,
+                    priority=3,
                     tags="rotating_light",
                 )
 

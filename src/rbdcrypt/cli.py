@@ -657,6 +657,7 @@ def doctor() -> None:
             "api_connectivity": api_ok,
             "notifications": {
                 "enabled": runtime.settings.notifications.enabled,
+                "max_priority": int(runtime.settings.notifications.max_priority),
                 "topic": runtime.settings.notifications.topic,
                 "url": runtime.settings.notifications.ntfy_url,
                 "command_enabled": runtime.settings.notifications.command_enabled,

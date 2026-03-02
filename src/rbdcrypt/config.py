@@ -192,6 +192,10 @@ class NotificationSettings(BaseModel):
     ntfy_url: str | None = Field(default=None, validation_alias=AliasChoices("ntfy_url", "url"))
     topic: str | None = Field(default=None, validation_alias=AliasChoices("ntfy_topic", "topic"))
     enabled: bool = Field(default=False, validation_alias=AliasChoices("ntfy_enabled", "enabled"))
+    max_priority: int = Field(
+        default=3,
+        validation_alias=AliasChoices("ntfy_max_priority", "max_priority"),
+    )
     command_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("ntfy_command_enabled", "command_enabled"),

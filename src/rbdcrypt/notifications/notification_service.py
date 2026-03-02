@@ -179,7 +179,7 @@ class NotificationService:
         self._send(
             title=f"ENTRY {clean_symbol} {side_text}",
             message="\n".join(lines),
-            priority=4,
+            priority=3,
             tags="chart_with_upwards_trend",
             attach_url=attachment[0] if attachment else None,
             filename=attachment[1] if attachment else None,
@@ -236,7 +236,7 @@ class NotificationService:
         self._send(
             title=f"{reason_label} {clean_symbol} {self._fmt_pct(pnl)}",
             message="\n".join(lines),
-            priority=4,
+            priority=3,
             tags=self._exit_tags(reason_code=reason_code, pnl_pct=pnl),
             attach_url=attachment[0] if attachment else None,
             filename=attachment[1] if attachment else None,
@@ -264,7 +264,7 @@ class NotificationService:
         self._send(
             title="ERROR",
             message="\n".join(lines),
-            priority=5,
+            priority=3,
             tags="rotating_light",
         )
 
@@ -375,7 +375,7 @@ class NotificationService:
                             f"sunucudaki klasor: {location}\n"
                             f"hazirlanan: {parts_note}"
                         ),
-                        priority=4,
+                        priority=3,
                         tags="warning",
                     )
             finally:
@@ -422,7 +422,7 @@ class NotificationService:
         self._send(
             title="SUMMARY",
             message="\n".join(lines),
-            priority=2,
+            priority=3,
             tags="bar_chart",
         )
 
