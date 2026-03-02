@@ -21,7 +21,7 @@ from ..storage.db import Database
 from ..storage.migrations import apply_migrations
 from ..storage.repositories import Repositories, build_repositories
 from ..strategy.parity_signal_engine import ParitySignalEngine
-from .logging_setup import setup_logging
+from .logging_setup import get_component_logger, setup_logging
 
 
 @dataclass(slots=True)
@@ -41,6 +41,9 @@ class RuntimeContainer:
     notification_service: NotificationService
     notifier: NtfyClient
     logger: Logger
+    signals_logger: Logger
+    trades_logger: Logger
+    diagnostics_logger: Logger
     clock: SystemClock
 
     def close(self) -> None:
@@ -50,7 +53,10 @@ class RuntimeContainer:
 
 def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
     settings = settings or load_settings()
-    logger = setup_logging(settings.logging)
+    system_logger = setup_logging(settings.logging)
+    signals_logger = get_component_logger("signals")
+    trades_logger = get_component_logger("trades")
+    diagnostics_logger = get_component_logger("health")
     clock = SystemClock()
 
     db = Database(
@@ -60,18 +66,67 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
     )
     apply_migrations(db)
     repos = build_repositories(db)
+    strategy_profile = settings.load_strategy_profile()
+    system_logger.info(
+        "strategy_profile_loaded",
+        extra={
+            "event": {
+                "profile_id": strategy_profile.name,
+                "trigger_mode": strategy_profile.filters.ltf_trigger,
+                "bias_mode": f"{strategy_profile.filters.htf_bias.ma_type}_{strategy_profile.filters.htf_bias.timeframe}",
+            }
+        },
+    )
+    repos.system_events.insert(
+        event_type="runtime_start",
+        level="info",
+        details={
+            "profile_id": strategy_profile.name,
+            "trigger_mode": strategy_profile.filters.ltf_trigger,
+            "bias_mode": f"{strategy_profile.filters.htf_bias.ma_type}_{strategy_profile.filters.htf_bias.timeframe}",
+        },
+    )
 
     binance_client = BinanceClient(settings.binance, settings.http_retry)
     fetcher = MarketFetcher(
         settings=settings,
         client=binance_client,
         rate_limiter=SimpleRateLimiter(settings.binance.request_min_interval_sec),
+        logger=system_logger,
     )
     signal_engine = ParitySignalEngine(settings=settings, interval=settings.binance.interval)
     notifier = NtfyClient(settings.notifications)
+    notification_cfg = settings.notifications
+    system_logger.info(
+        "notification_config_loaded",
+        extra={
+            "event": {
+                "enabled": bool(notification_cfg.enabled),
+                "topic": notification_cfg.topic,
+                "url": notification_cfg.ntfy_url,
+                "command_enabled": bool(notification_cfg.command_enabled),
+                "command_topic": notification_cfg.command_topic,
+                "notify_on_startup": bool(notification_cfg.notify_on_startup),
+                "notify_on_open": bool(notification_cfg.notify_on_open),
+                "notify_on_close": bool(notification_cfg.notify_on_close),
+                "notify_on_cycle_summary": bool(notification_cfg.notify_on_cycle_summary),
+            }
+        },
+    )
+    if notification_cfg.enabled and (not notification_cfg.ntfy_url or not notification_cfg.topic):
+        system_logger.warning(
+            "notification_config_incomplete",
+            extra={
+                "event": {
+                    "enabled": bool(notification_cfg.enabled),
+                    "topic_present": bool(notification_cfg.topic),
+                    "url_present": bool(notification_cfg.ntfy_url),
+                }
+            },
+        )
     notification_service = NotificationService(
         notifier=notifier,
-        logger=logger,
+        logger=system_logger,
         now_fn=clock.now,
         state_store=repos.runtime_state,
         chart_enabled=bool(settings.runtime.chart_enabled),
@@ -83,7 +138,7 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
         signal_engine=signal_engine,
         repos=repos,
         now_fn=clock.now,
-        logger=logger,
+        logger=signals_logger,
         notifier=notifier,
         notification_service=notification_service,
     )
@@ -92,14 +147,14 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
         broker=PaperBroker(),
         repos=repos,
         now_fn=clock.now,
-        logger=logger,
+        logger=trades_logger,
         notifier=notifier,
         notification_service=notification_service,
     )
     metrics_service = MetricsService(repos=repos)
     housekeeping_service = HousekeepingService(settings=settings, repos=repos)
-    backfill_service = BackfillService(settings=settings, fetcher=fetcher, repos=repos, logger=logger)
-    replay_service = ReplayService(settings=settings, repos=repos, signal_engine=signal_engine, logger=logger)
+    backfill_service = BackfillService(settings=settings, fetcher=fetcher, repos=repos, logger=system_logger)
+    replay_service = ReplayService(settings=settings, repos=repos, signal_engine=signal_engine, logger=system_logger)
 
     return RuntimeContainer(
         settings=settings,
@@ -116,6 +171,9 @@ def build_runtime(settings: AppSettings | None = None) -> RuntimeContainer:
         housekeeping_service=housekeeping_service,
         notification_service=notification_service,
         notifier=notifier,
-        logger=logger,
+        logger=system_logger,
+        signals_logger=signals_logger,
+        trades_logger=trades_logger,
+        diagnostics_logger=diagnostics_logger,
         clock=clock,
     )

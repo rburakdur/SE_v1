@@ -99,6 +99,7 @@ class NotificationService:
             closed=0,
             scan_errors=0,
             source="startup",
+            force=True,
         )
 
     def on_cycle_completed(
@@ -119,6 +120,8 @@ class NotificationService:
             active_positions=active_positions,
             pending_signals=0,
         )
+        if not self._is_cycle_summary_enabled():
+            return
         self._maybe_send_summary(
             now=now,
             perf=perf,
@@ -127,6 +130,7 @@ class NotificationService:
             closed=closed,
             scan_errors=scan_errors,
             source="runtime loop",
+            force=False,
         )
 
     def on_position_open(
@@ -399,8 +403,12 @@ class NotificationService:
         closed: int,
         scan_errors: int,
         source: str,
+        force: bool,
     ) -> None:
-        if not self._should_send_summary(now):
+        if force:
+            slot = now.strftime("%Y-%m-%dT%H:%M")
+            self._remember_summary_slot(slot)
+        elif not self._should_send_summary(now):
             return
         lines = [
             f"{SUMMARY_EMOJI} SUMMARY",
@@ -417,6 +425,12 @@ class NotificationService:
             priority=2,
             tags="bar_chart",
         )
+
+    def _is_cycle_summary_enabled(self) -> bool:
+        if self.notifier is None:
+            return False
+        cfg = getattr(self.notifier, "config", None)
+        return bool(getattr(cfg, "notify_on_cycle_summary", False))
 
     def _perf_lines_dashboard(self, perf: PerformanceSnapshot) -> list[str]:
         return [
@@ -460,6 +474,10 @@ class NotificationService:
         if now.minute not in {1, 31}:
             return False
         return self._should_send_slot(name="last_summary_slot", slot=now.strftime("%Y-%m-%dT%H:%M"))
+
+    def _remember_summary_slot(self, slot: str) -> None:
+        self._last_summary_slot = slot
+        self._save_state_value("last_summary_slot", slot)
 
     def _load_state_value(self, name: str) -> str | None:
         if self.state_store is None:
@@ -780,10 +798,16 @@ class NotificationService:
         if reason is None:
             return "exit"
         normalized = reason.strip().lower()
-        if normalized == "tp":
+        if normalized in {"tp", "tp2", "take_profit"}:
             return "tp"
-        if normalized == "sl":
+        if normalized in {"sl", "stop_loss"}:
             return "sl"
+        if normalized == "session_exit":
+            return "session"
+        if normalized == "bias_flip":
+            return "bias"
+        if normalized == "max_hold":
+            return "hold"
         return "exit"
 
     @staticmethod
@@ -792,6 +816,12 @@ class NotificationService:
             return "TP"
         if reason_code == "sl":
             return "SL"
+        if reason_code == "session":
+            return "SESSION"
+        if reason_code == "bias":
+            return "BIAS"
+        if reason_code == "hold":
+            return "HOLD"
         return "EXIT"
 
     @staticmethod
@@ -800,6 +830,8 @@ class NotificationService:
             return "white_check_mark"
         if reason_code == "sl":
             return "x"
+        if reason_code in {"session", "bias", "hold"}:
+            return "warning"
         return "white_check_mark" if pnl_pct >= 0 else "x"
 
     @staticmethod

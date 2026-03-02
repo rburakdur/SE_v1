@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
-from rbdcrypt.cli import _reset_runtime_state, _runtime_recently_active
+from rbdcrypt.cli import (
+    _archive_existing_db_files,
+    _recreate_clean_database,
+    _reset_runtime_state,
+    _reset_state_files,
+    _runtime_recently_active,
+)
 from rbdcrypt.config import AppSettings
 from rbdcrypt.storage.repositories import build_repositories
 
@@ -64,8 +72,20 @@ def test_reset_runtime_state_resets_core_tables_and_defaults(temp_db) -> None:
         heartbeats_count = int(conn.execute("SELECT COUNT(*) AS c FROM heartbeats").fetchone()["c"])
 
     assert "old_key" not in keys
-    assert set(keys.keys()) == {"portfolio", "cooldowns", "trade_missed_counters", "notifications_state"}
-    assert float(keys["portfolio"]["balance"]) == 100.0
+    assert set(keys.keys()) == {
+        "portfolio",
+        "cooldowns",
+        "processed_signal_keys",
+        "active_position_index",
+        "recovery",
+        "flap_counters",
+        "trade_missed_counters",
+        "active_profile",
+        "risk_runtime_defaults",
+        "notifications_state",
+    }
+    assert float(keys["portfolio"]["starting_balance"]) == 150.0
+    assert float(keys["portfolio"]["balance"]) == 150.0
     assert float(keys["portfolio"]["realized_pnl"]) == 0.0
     assert ohlcv_count == 1
     assert heartbeats_count == 0
@@ -123,3 +143,35 @@ def test_runtime_recently_active_ignores_stale_heartbeat(temp_db) -> None:
             ("trader", "ok", "{}", old.isoformat()),
         )
     assert _runtime_recently_active(runtime) is False
+
+
+def test_archive_and_recreate_database_flow(tmp_path: Path) -> None:
+    db_path = tmp_path / "rbdcrypt.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE sample(id INTEGER PRIMARY KEY, v TEXT)")
+        conn.execute("INSERT INTO sample(v) VALUES ('x')")
+        conn.commit()
+    db_path.with_suffix(".sqlite3-wal").write_text("wal", encoding="utf-8")
+    db_path.with_suffix(".sqlite3-shm").write_text("shm", encoding="utf-8")
+
+    archived = _archive_existing_db_files(db_path=db_path, archive_dir=tmp_path / "archive")
+    assert len(archived) >= 1
+
+    _recreate_clean_database(db_path=db_path, wal=True, busy_timeout_ms=5000)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_state'"
+        ).fetchone()
+    assert row is not None
+
+
+def test_reset_state_files_resets_snapshot(tmp_path: Path) -> None:
+    cfg = AppSettings(_env_file=None)
+    cfg.storage.snapshot_path = tmp_path / "state" / "runtime_snapshot.json"
+    cfg.storage.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.storage.snapshot_path.write_text('{"old": true}', encoding="utf-8")
+
+    reset_files = _reset_state_files(cfg)
+
+    assert reset_files == [str(cfg.storage.snapshot_path)]
+    assert cfg.storage.snapshot_path.read_text(encoding="utf-8").strip() == "{}"

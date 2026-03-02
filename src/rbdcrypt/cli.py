@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
+import sqlite3
+import time
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,6 +15,8 @@ import typer
 from .config import resolve_env_file
 from .runtime.app import build_runtime
 from .runtime.worker import RuntimeWorker
+from .storage.db import Database
+from .storage.migrations import apply_migrations
 
 
 app = typer.Typer(add_completion=False, help="rbdcrypt futures signal/trading engine (paper-first)")
@@ -67,6 +72,7 @@ def _reset_runtime_state(runtime, *, include_ohlcv: bool) -> dict[str, object]:
     now_iso = now.isoformat()
     hour_anchor = now.strftime("%Y-%m-%dT%H:00:00+00:00")
     portfolio = {
+        "starting_balance": float(runtime.settings.balance.starting_balance),
         "balance": float(runtime.settings.balance.starting_balance),
         "realized_pnl": 0.0,
         "day_anchor": now_iso,
@@ -74,12 +80,40 @@ def _reset_runtime_state(runtime, *, include_ohlcv: bool) -> dict[str, object]:
     default_state = {
         "portfolio": portfolio,
         "cooldowns": {},
+        "processed_signal_keys": {},
+        "active_position_index": {},
+        "recovery": {
+            "recovered_count": 0,
+            "at": now_iso,
+            "symbols": [],
+            "healed": False,
+            "truth_source": "db",
+        },
+        "flap_counters": {
+            "duplicate_signal_ignored": 0,
+            "cooldown_blocked": 0,
+            "startup_stabilization_blocked": 0,
+            "intent_lock_blocked": 0,
+            "updated_at": now_iso,
+        },
         "trade_missed_counters": {
             "hour_anchor": hour_anchor,
             "hourly_missed_signals": 0,
             "last_cycle_missed_signals": 0,
             "last_cycle_max_pos_blocked": 0,
+            "debounce_blocked_total": 0,
+            "cooldown_blocked_total": 0,
+            "startup_blocked_total": 0,
+            "intent_lock_blocked_total": 0,
             "updated_at": now_iso,
+        },
+        "active_profile": {
+            "profile_id": str(runtime.settings.strategy.profile_name),
+            "loaded_at": now_iso,
+        },
+        "risk_runtime_defaults": {
+            "base_position_size_usd": float(runtime.settings.risk.fixed_notional_per_trade or 0.0),
+            "max_open_positions": int(runtime.settings.risk.max_active_positions),
         },
         "notifications_state": {},
     }
@@ -102,6 +136,9 @@ def _reset_runtime_state(runtime, *, include_ohlcv: bool) -> dict[str, object]:
         "portfolio": portfolio,
         "include_ohlcv": include_ohlcv,
         "reset_at_utc": now_iso,
+        "default_profile": str(runtime.settings.strategy.profile_name),
+        "base_position_size_usd": float(runtime.settings.risk.fixed_notional_per_trade or 0.0),
+        "max_open_positions": int(runtime.settings.risk.max_active_positions),
     }
 
 
@@ -126,6 +163,70 @@ def _runtime_recently_active(runtime) -> bool:
     if latest is None:
         return False
     return (datetime.now(tz=UTC) - latest) <= threshold
+
+
+def _archive_existing_db_files(*, db_path: Path, archive_dir: Path) -> list[str]:
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
+    archived: list[str] = []
+    candidates = [db_path, db_path.with_suffix(db_path.suffix + "-wal"), db_path.with_suffix(db_path.suffix + "-shm")]
+    for src in candidates:
+        if not src.exists():
+            continue
+        dst = archive_dir / f"{src.name}.{ts}.bak"
+        shutil.copy2(src, dst)
+        archived.append(str(dst))
+    return archived
+
+
+def _recreate_clean_database(*, db_path: Path, wal: bool, busy_timeout_ms: int) -> None:
+    recreate_in_place = False
+    for target in (db_path, db_path.with_suffix(db_path.suffix + "-wal"), db_path.with_suffix(db_path.suffix + "-shm")):
+        if not target.exists():
+            continue
+        deleted = False
+        for attempt in range(5):
+            try:
+                target.unlink()
+                deleted = True
+                break
+            except PermissionError:
+                if attempt >= 4:
+                    if target == db_path:
+                        recreate_in_place = True
+                        break
+                    raise
+                time.sleep(0.15)
+        if not deleted and target != db_path and target.exists():
+            try:
+                target.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    if recreate_in_place and db_path.exists():
+        with sqlite3.connect(str(db_path)) as conn:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            for row in rows:
+                name = str(row[0])
+                safe_name = name.replace('"', '""')
+                conn.execute(f'DROP TABLE IF EXISTS "{safe_name}"')
+            conn.commit()
+
+    db = Database(path=db_path, wal=wal, busy_timeout_ms=busy_timeout_ms)
+    apply_migrations(db)
+
+
+def _reset_state_files(settings) -> list[str]:
+    reset_files: list[str] = []
+    snapshot_path = settings.storage.snapshot_path
+    if snapshot_path.exists():
+        snapshot_path.unlink()
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text("{}", encoding="utf-8")
+    reset_files.append(str(snapshot_path))
+    return reset_files
 
 
 @app.command()
@@ -173,17 +274,61 @@ def reset_state_cmd(
 ) -> None:
     if not yes:
         raise typer.BadParameter("Refusing to reset without --yes")
+
     runtime = build_runtime()
+    settings = runtime.settings
+    archived_db_files: list[str] = []
+    backup_path: Path | None = None
     try:
         if _runtime_recently_active(runtime) and not force_while_active:
             raise typer.BadParameter(
                 "Runtime appears active. Stop service first (recommended), or use --force-while-active."
             )
         backup_path = _create_state_backup_zip(runtime, out_dir=out, label=label) if backup else None
-        result = _reset_runtime_state(runtime, include_ohlcv=include_ohlcv)
-        _json_print({"backup_zip": str(backup_path) if backup_path else None, **result})
+        # Reset boot defaults pinned by final production prep request.
+        settings.strategy.profile_name = "intraday_swing_v2_default"
+        settings.balance.starting_balance = 150.0
+        settings.risk.fixed_notional_per_trade = 25.0
+        settings.risk.max_active_positions = 5
+        archived_db_files = _archive_existing_db_files(
+            db_path=settings.storage.db_path,
+            archive_dir=out / "db_archive",
+        )
     finally:
         runtime.close()
+
+    _recreate_clean_database(
+        db_path=settings.storage.db_path,
+        wal=bool(settings.storage.wal),
+        busy_timeout_ms=int(settings.storage.busy_timeout_ms),
+    )
+    reset_state_files = _reset_state_files(settings)
+
+    clean_runtime = build_runtime(settings)
+    try:
+        result = _reset_runtime_state(clean_runtime, include_ohlcv=include_ohlcv)
+        clean_runtime.repos.system_events.insert(
+            event_type="state_reset",
+            level="warning",
+            details={
+                "profile_id": settings.strategy.profile_name,
+                "equity": settings.balance.starting_balance,
+                "base_position_size_usd": settings.risk.fixed_notional_per_trade,
+                "max_open_positions": settings.risk.max_active_positions,
+                "archived_db_files": archived_db_files,
+            },
+        )
+        _json_print(
+            {
+                "backup_zip": str(backup_path) if backup_path else None,
+                "archived_db_files": archived_db_files,
+                "state_files_reset": reset_state_files,
+                "db_recreated": str(settings.storage.db_path),
+                **result,
+            }
+        )
+    finally:
+        clean_runtime.close()
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -196,8 +341,14 @@ def _parse_dt(value: str | None) -> datetime | None:
 
 
 def _portfolio_snapshot(runtime) -> dict[str, object]:
-    starting = float(runtime.settings.balance.starting_balance)
     portfolio = runtime.repos.runtime_state.get_json("portfolio") or {}
+    raw_starting = portfolio.get("starting_balance", runtime.settings.balance.starting_balance)
+    try:
+        starting = float(raw_starting)
+    except (TypeError, ValueError):
+        starting = float(runtime.settings.balance.starting_balance)
+    if starting <= 0:
+        starting = float(runtime.settings.balance.starting_balance)
     balance = float(portfolio.get("balance", starting))
     realized_pnl = float(portfolio.get("realized_pnl", balance - starting))
     pnl_pct_cumulative = ((balance - starting) / starting * 100.0) if starting > 0 else 0.0
@@ -313,6 +464,62 @@ def _recent_signals(runtime, *, limit: int = 20) -> list[dict[str, object]]:
     return out
 
 
+def _daily_summary(runtime, *, day_utc: datetime) -> dict[str, object]:
+    start = day_utc.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    with runtime.db.read_only() as conn:
+        signal_total_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM signals WHERE created_at >= ? AND created_at < ?",
+            (start.isoformat(), end.isoformat()),
+        ).fetchone()
+        signal_outcomes = conn.execute(
+            """
+            SELECT COALESCE(evaluator_outcome, 'blocked') AS outcome, COUNT(*) AS c
+            FROM signals
+            WHERE created_at >= ? AND created_at < ?
+            GROUP BY COALESCE(evaluator_outcome, 'blocked')
+            ORDER BY c DESC
+            """,
+            (start.isoformat(), end.isoformat()),
+        ).fetchall()
+        trades_opened_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM trades_closed WHERE opened_at >= ? AND opened_at < ?",
+            (start.isoformat(), end.isoformat()),
+        ).fetchone()
+        trades_closed_row = conn.execute(
+            "SELECT COUNT(*) AS c, COALESCE(SUM(pnl_quote), 0.0) AS pnl FROM trades_closed WHERE closed_at >= ? AND closed_at < ?",
+            (start.isoformat(), end.isoformat()),
+        ).fetchone()
+        blocked_rows = conn.execute(
+            """
+            SELECT COALESCE(blocked_reason, '-') AS reason, COUNT(*) AS c
+            FROM signal_decisions
+            WHERE outcome = 'blocked' AND created_at >= ? AND created_at < ?
+            GROUP BY COALESCE(blocked_reason, '-')
+            ORDER BY c DESC
+            LIMIT 10
+            """,
+            (start.isoformat(), end.isoformat()),
+        ).fetchall()
+    outcome_counts = {str(row["outcome"]): int(row["c"]) for row in signal_outcomes}
+    return {
+        "date_utc": start.date().isoformat(),
+        "signals_total": int(signal_total_row["c"] if signal_total_row else 0),
+        "blocked_candidate_auto": {
+            "blocked": int(outcome_counts.get("blocked", 0)),
+            "candidate": int(outcome_counts.get("candidate", 0)),
+            "auto": int(outcome_counts.get("auto", 0)),
+        },
+        "trades_opened": int(trades_opened_row["c"] if trades_opened_row else 0),
+        "trades_closed": int(trades_closed_row["c"] if trades_closed_row else 0),
+        "pnl_quote": float(trades_closed_row["pnl"] if trades_closed_row else 0.0),
+        "top_blocked_reasons": [
+            {"reason": str(row["reason"]), "count": int(row["c"])}
+            for row in blocked_rows
+        ],
+    }
+
+
 @app.command()
 def backfill(
     symbols: str = typer.Option("top:10", help="Comma list (BTCUSDT,ETHUSDT) or top[:N]"),
@@ -420,6 +627,7 @@ def doctor() -> None:
         report = {
             "db_integrity": runtime.repos.maintenance.integrity_check(),
             "db_path": str(runtime.settings.storage.db_path),
+            "strategy_profile": runtime.settings.strategy.profile_name,
             "config_env_file": str(env_file) if env_file else None,
             "config_env_file_exists": bool(env_file and env_file.is_file()),
             "disk_free_mb": disk["free_mb"],
@@ -438,6 +646,10 @@ def doctor() -> None:
             },
             "cooldown_symbols": sorted(cooldowns.keys()),
             "cooldown_count": len(cooldowns),
+            "risk_limits": {
+                "base_position_size_usd": float(runtime.settings.risk.fixed_notional_per_trade or 0.0),
+                "max_open_positions": int(runtime.settings.risk.max_active_positions),
+            },
             "error_count_last_1h": runtime.repos.errors.count_since(now - timedelta(hours=1)),
             "trade_missed_counters": missed,
             "blocked_reasons_last_200": _decision_reason_summary(runtime, limit=200),
@@ -447,6 +659,12 @@ def doctor() -> None:
                 "enabled": runtime.settings.notifications.enabled,
                 "topic": runtime.settings.notifications.topic,
                 "url": runtime.settings.notifications.ntfy_url,
+                "command_enabled": runtime.settings.notifications.command_enabled,
+                "command_topic": runtime.settings.notifications.command_topic,
+                "notify_on_startup": runtime.settings.notifications.notify_on_startup,
+                "notify_on_open": runtime.settings.notifications.notify_on_open,
+                "notify_on_close": runtime.settings.notifications.notify_on_close,
+                "notify_on_cycle_summary": runtime.settings.notifications.notify_on_cycle_summary,
             },
             "scanner_heartbeat": runtime.repos.heartbeats.latest("scanner"),
             "trader_heartbeat": runtime.repos.heartbeats.latest("trader"),
@@ -472,6 +690,25 @@ def why_no_trade(
             "recent_signals": _recent_signals(runtime, limit=min(limit, 30)),
         }
         _json_print(report)
+    finally:
+        runtime.close()
+
+
+@app.command("daily-summary")
+def daily_summary_cmd(
+    date_utc: str | None = typer.Option(
+        None,
+        "--date",
+        help="UTC date (YYYY-MM-DD). Defaults to today UTC.",
+    ),
+) -> None:
+    runtime = build_runtime()
+    try:
+        if date_utc is None:
+            target = datetime.now(tz=UTC)
+        else:
+            target = datetime.fromisoformat(f"{date_utc}T00:00:00+00:00")
+        _json_print(_daily_summary(runtime, day_utc=target))
     finally:
         runtime.close()
 

@@ -18,6 +18,11 @@ CREATE TABLE IF NOT EXISTS signals (
     metrics_json TEXT NOT NULL,
     power_breakdown_json TEXT NOT NULL,
     meta_json TEXT NOT NULL,
+    evaluator_outcome TEXT,
+    strategy_profile TEXT,
+    trigger_mode TEXT,
+    bias_mode TEXT,
+    blocked_reason_codes_json TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -99,7 +104,12 @@ CREATE TABLE IF NOT EXISTS trades_closed (
     pnl_quote REAL NOT NULL,
     rr_initial REAL NOT NULL,
     fee_paid REAL NOT NULL,
-    meta_json TEXT NOT NULL
+    meta_json TEXT NOT NULL,
+    profile_id TEXT,
+    trigger_mode TEXT,
+    bias_mode TEXT,
+    entry_layer TEXT,
+    execution_mode TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_closed_closed_at ON trades_closed(closed_at DESC);
@@ -133,6 +143,16 @@ CREATE TABLE IF NOT EXISTS heartbeats (
 
 CREATE INDEX IF NOT EXISTS idx_heartbeats_component_created_at ON heartbeats(component, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS system_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    level TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON system_events(created_at DESC);
+
 CREATE TABLE IF NOT EXISTS ohlcv_futures (
     symbol TEXT NOT NULL,
     interval TEXT NOT NULL,
@@ -155,3 +175,21 @@ CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol_interval_open_time ON ohlcv_futures(
 def apply_migrations(db: Database) -> None:
     with db.transaction() as conn:
         conn.executescript(SCHEMA_SQL)
+        _ensure_column(conn, "signals", "evaluator_outcome", "TEXT")
+        _ensure_column(conn, "signals", "strategy_profile", "TEXT")
+        _ensure_column(conn, "signals", "trigger_mode", "TEXT")
+        _ensure_column(conn, "signals", "bias_mode", "TEXT")
+        _ensure_column(conn, "signals", "blocked_reason_codes_json", "TEXT")
+        _ensure_column(conn, "trades_closed", "profile_id", "TEXT")
+        _ensure_column(conn, "trades_closed", "trigger_mode", "TEXT")
+        _ensure_column(conn, "trades_closed", "bias_mode", "TEXT")
+        _ensure_column(conn, "trades_closed", "entry_layer", "TEXT")
+        _ensure_column(conn, "trades_closed", "execution_mode", "TEXT")
+
+
+def _ensure_column(conn, table: str, column: str, definition: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    names = {str(row["name"]) for row in rows}
+    if column in names:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

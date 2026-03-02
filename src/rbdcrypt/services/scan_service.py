@@ -29,6 +29,9 @@ class ScanRunResult:
     symbol_states: dict[str, SymbolBarState] = field(default_factory=dict)
     scanned_symbols: int = 0
     error_count: int = 0
+    outcome_counts: dict[str, int] = field(default_factory=dict)
+    blocked_reason_counts: dict[str, int] = field(default_factory=dict)
+    score_summary_by_outcome: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @property
     def auto_signals(self) -> list[SignalEvent]:
@@ -65,6 +68,7 @@ class ScanService:
         prices: dict[str, float] = {}
         chart_points_by_symbol: dict[str, list[float]] = {}
         symbol_states: dict[str, SymbolBarState] = {}
+        htf_candles_by_symbol: dict[str, object] = {}
         error_count = 0
         error_samples: list[str] = []
 
@@ -112,9 +116,41 @@ class ScanService:
             )
             self.logger.error("scan_fetch_error", extra={"event": {"symbol": symbol, "msg": message}})
 
+        htf_bias_enabled, htf_timeframe = self.signal_engine.htf_bias_requirements()
+        if htf_bias_enabled:
+            htf_limit = max(int(self.settings.binance.kline_limit), 120)
+            htf_results, htf_errors = self.fetcher.fetch_many_candles_for_interval(
+                symbols=symbols,
+                interval=htf_timeframe,
+                worker_count=self.settings.runtime.worker_count,
+                limit=htf_limit,
+            )
+            htf_candles_by_symbol = htf_results
+            for symbol, message in htf_errors.items():
+                error_count += 1
+                if len(error_samples) < 5:
+                    error_samples.append(f"{symbol}:htf:{message}")
+                self.repos.errors.insert(
+                    ErrorEvent(
+                        source="scan_service.fetch_htf_candles",
+                        error_type="FetchError",
+                        message=message,
+                        context={"symbol": symbol, "timeframe": htf_timeframe},
+                    )
+                )
+                self.logger.error(
+                    "scan_fetch_htf_error",
+                    extra={"event": {"symbol": symbol, "timeframe": htf_timeframe, "msg": message}},
+                )
+
         for symbol, candles in candles_by_symbol.items():
             try:
-                eval_result = self.signal_engine.evaluate_detailed(symbol=symbol, candles=candles, btc_context=btc_ctx)
+                eval_result = self.signal_engine.evaluate_detailed(
+                    symbol=symbol,
+                    candles=candles,
+                    btc_context=btc_ctx,
+                    htf_candles=htf_candles_by_symbol.get(symbol),
+                )
                 signal, decisions = eval_result.signal, eval_result.decisions
                 symbol_states[symbol] = eval_result.symbol_state
                 signal_id = self.repos.signals.insert_signal(signal)
@@ -140,12 +176,55 @@ class ScanService:
                             }
                         },
                     )
+                self.logger.info(
+                    "signal_outcome",
+                    extra={
+                        "event": {
+                            "symbol": signal.symbol,
+                            "outcome": signal.meta.get("evaluator_outcome"),
+                            "candidate": signal.candidate_pass,
+                            "auto": signal.auto_pass,
+                            "blocked_reason_codes": signal.meta.get("blocked_reason_codes", []),
+                            "downgrade_reason_codes": signal.meta.get("downgrade_reason_codes", []),
+                            "rejection_stage": signal.meta.get("rejection_stage", ""),
+                            "power_score": signal.power_score,
+                        }
+                    },
+                )
             except Exception as exc:
                 error_count += 1
                 if len(error_samples) < 5:
                     error_samples.append(f"{symbol}:{exc.__class__.__name__}")
                 self._record_error("scan_service.symbol", exc, {"symbol": symbol})
                 continue
+
+        outcome_counts = {"blocked": 0, "candidate": 0, "auto": 0}
+        blocked_reason_counts: Counter[str] = Counter()
+        scores_by_outcome: dict[str, list[float]] = {"blocked": [], "candidate": [], "auto": []}
+        for signal in signals:
+            outcome_raw = signal.meta.get("evaluator_outcome")
+            outcome = str(outcome_raw).lower() if isinstance(outcome_raw, str) else "blocked"
+            if outcome not in outcome_counts:
+                outcome = "blocked"
+            outcome_counts[outcome] += 1
+            scores_by_outcome[outcome].append(float(signal.power_score))
+            reason_codes = signal.meta.get("blocked_reason_codes", [])
+            if isinstance(reason_codes, list):
+                for reason in reason_codes:
+                    if isinstance(reason, str) and reason:
+                        blocked_reason_counts[reason] += 1
+
+        score_summary_by_outcome: dict[str, dict[str, float]] = {}
+        for outcome, values in scores_by_outcome.items():
+            if not values:
+                score_summary_by_outcome[outcome] = {"min": 0.0, "max": 0.0, "avg": 0.0, "count": 0.0}
+                continue
+            score_summary_by_outcome[outcome] = {
+                "min": float(min(values)),
+                "max": float(max(values)),
+                "avg": float(sum(values) / max(1, len(values))),
+                "count": float(len(values)),
+            }
 
         finished = self.now_fn()
         payload = {
@@ -154,6 +233,8 @@ class ScanService:
             "scanned_symbols": len(signals),
             "errors": error_count,
             "auto_signals": sum(1 for s in signals if s.auto_pass),
+            "outcome_counts": outcome_counts,
+            "top_blocked_reasons": blocked_reason_counts.most_common(8),
         }
         self.repos.runtime_state.set_json("last_scan", payload)
         self.repos.heartbeats.insert(
@@ -164,6 +245,16 @@ class ScanService:
         self.logger.info(
             "scan_completed",
             extra={"event": {"scanned": len(signals), "errors": error_count, "auto": payload["auto_signals"]}},
+        )
+        self.logger.info(
+            "scan_diagnostics",
+            extra={
+                "event": {
+                    "outcome_counts": outcome_counts,
+                    "top_blocked_reasons": blocked_reason_counts.most_common(8),
+                    "score_summary_by_outcome": score_summary_by_outcome,
+                }
+            },
         )
         if self.settings.notifications.notify_on_scan_degraded and error_count > 0:
             sample_text = " | ".join(error_samples[:3]) if error_samples else "-"
@@ -202,6 +293,9 @@ class ScanService:
             symbol_states=symbol_states,
             scanned_symbols=len(signals),
             error_count=error_count,
+            outcome_counts=outcome_counts,
+            blocked_reason_counts=dict(blocked_reason_counts),
+            score_summary_by_outcome=score_summary_by_outcome,
         )
 
     def _record_error(self, source: str, exc: Exception, context: dict[str, object]) -> None:

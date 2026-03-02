@@ -69,11 +69,25 @@ class RuntimeSettings(BaseModel):
     one_shot: bool = False
     max_loop_errors_before_sleep: int = 5
     loop_error_sleep_sec: int = 30
+    startup_stabilization_sec: int = 30
+    startup_stabilization_cycles: int = 1
+    processed_signal_retention_minutes: int = 240
+    processed_signal_max_keys: int = 5000
+    universe_symbol_blacklist: list[str] = Field(
+        default_factory=lambda: ["USDCUSDT", "FDUSDUSDT", "USD1USDT"],
+    )
+    universe_stable_like_pattern_enabled: bool = True
+
+
+class StrategySettings(BaseModel):
+    profile_name: str = "intraday_swing_v2_default"
+    profiles_dir: Path = Path("strategies")
+    profile_path: Path | None = None
 
 
 class BalanceSettings(BaseModel):
     mode: Literal["cumulative", "daily_reset"] = "cumulative"
-    starting_balance: float = 100.0
+    starting_balance: float = 150.0
     daily_reset_enabled: bool = False
 
     def resolved_mode(self) -> Literal["cumulative", "daily_reset"]:
@@ -85,8 +99,14 @@ class BalanceSettings(BaseModel):
 class RiskSettings(BaseModel):
     risk_per_trade_pct: float = 0.01
     leverage: float = 1.0
-    max_active_positions: int = 3
-    fixed_notional_per_trade: float | None = 25.0
+    max_active_positions: int = Field(
+        default=5,
+        validation_alias=AliasChoices("max_active_positions", "max_open_positions"),
+    )
+    fixed_notional_per_trade: float | None = Field(
+        default=25.0,
+        validation_alias=AliasChoices("fixed_notional_per_trade", "base_position_size_usd"),
+    )
     min_rr: float = 1.2
     min_notional: float = 10.0
     fee_pct_per_side: float = 0.0004
@@ -169,41 +189,41 @@ class LegacyParitySettings(BaseModel):
 
 
 class NotificationSettings(BaseModel):
-    ntfy_url: str | None = None
-    topic: str | None = Field(default=None, validation_alias=AliasChoices("topic", "ntfy_topic"))
-    enabled: bool = Field(default=False, validation_alias=AliasChoices("enabled", "ntfy_enabled"))
+    ntfy_url: str | None = Field(default=None, validation_alias=AliasChoices("ntfy_url", "url"))
+    topic: str | None = Field(default=None, validation_alias=AliasChoices("ntfy_topic", "topic"))
+    enabled: bool = Field(default=False, validation_alias=AliasChoices("ntfy_enabled", "enabled"))
     command_enabled: bool = Field(
         default=False,
-        validation_alias=AliasChoices("command_enabled", "ntfy_command_enabled"),
+        validation_alias=AliasChoices("ntfy_command_enabled", "command_enabled"),
     )
     command_topic: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("command_topic", "ntfy_command_topic"),
+        validation_alias=AliasChoices("ntfy_command_topic", "command_topic"),
     )
     timeout_sec: float = 4.0
     log_backup_enabled: bool = Field(
         default=False,
-        validation_alias=AliasChoices("log_backup_enabled", "ntfy_log_backup_enabled"),
+        validation_alias=AliasChoices("ntfy_log_backup_enabled", "log_backup_enabled"),
     )
     log_backup_repo_url: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("log_backup_repo_url", "ntfy_log_backup_repo_url"),
+        validation_alias=AliasChoices("ntfy_log_backup_repo_url", "log_backup_repo_url"),
     )
     log_backup_repo_branch: str = Field(
         default="main",
-        validation_alias=AliasChoices("log_backup_repo_branch", "ntfy_log_backup_repo_branch"),
+        validation_alias=AliasChoices("ntfy_log_backup_repo_branch", "log_backup_repo_branch"),
     )
     log_backup_clone_dir: Path = Field(
         default=Path("bot_data/backup_repo"),
-        validation_alias=AliasChoices("log_backup_clone_dir", "ntfy_log_backup_clone_dir"),
+        validation_alias=AliasChoices("ntfy_log_backup_clone_dir", "log_backup_clone_dir"),
     )
     log_backup_base_url: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("log_backup_base_url", "ntfy_log_backup_base_url"),
+        validation_alias=AliasChoices("ntfy_log_backup_base_url", "log_backup_base_url"),
     )
     log_backup_prefer_7z: bool = Field(
         default=True,
-        validation_alias=AliasChoices("log_backup_prefer_7z", "ntfy_log_backup_prefer_7z"),
+        validation_alias=AliasChoices("ntfy_log_backup_prefer_7z", "log_backup_prefer_7z"),
     )
     detail_level: Literal["compact", "detailed"] = "detailed"
     auto_signal_top_n: int = 5
@@ -236,6 +256,7 @@ class AppSettings(BaseSettings):
     housekeeping: HousekeepingSettings = Field(default_factory=HousekeepingSettings)
     binance: BinanceSettings = Field(default_factory=BinanceSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+    strategy: StrategySettings = Field(default_factory=StrategySettings)
     balance: BalanceSettings = Field(default_factory=BalanceSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     filters: FilterSettings = Field(default_factory=FilterSettings)
@@ -255,11 +276,21 @@ class AppSettings(BaseSettings):
         if self.storage.snapshot_enabled:
             self.storage.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
 
+    def load_strategy_profile(self):
+        from .strategy.profile_config import load_strategy_profile
+
+        return load_strategy_profile(
+            profile_name=self.strategy.profile_name,
+            profiles_dir=self.strategy.profiles_dir,
+            explicit_profile_path=self.strategy.profile_path,
+        )
+
 
 def load_settings() -> AppSettings:
     env_file = resolve_env_file()
     settings = AppSettings(_env_file=env_file) if env_file else AppSettings()
     settings.ensure_runtime_dirs()
+    settings.load_strategy_profile()
     return settings
 
 
@@ -270,7 +301,14 @@ def resolve_env_file() -> Path | None:
     if explicit:
         candidates.append(Path(explicit).expanduser())
 
-    candidates.append(Path.cwd() / ".env")
+    cwd = Path.cwd().resolve()
+    candidates.append(cwd / ".env")
+    parent = cwd
+    for _ in range(4):
+        parent = parent.parent
+        if parent == parent.parent:
+            break
+        candidates.append(parent / ".env")
     candidates.append(Path(__file__).resolve().parents[2] / ".env")
 
     seen: set[str] = set()

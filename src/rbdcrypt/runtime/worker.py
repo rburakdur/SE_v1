@@ -24,10 +24,23 @@ class RuntimeWorker:
     runtime: RuntimeContainer
     _MAX_NTFY_UPLOAD_BYTES = 2 * 1024 * 1024
     _UPLOAD_CHUNK_BYTES = 1800 * 1024
+    _startup_started_at: datetime | None = None
+    _startup_blocked_cycles: int = 0
 
     def run(self, *, one_shot: bool = False, max_iterations: int | None = None) -> None:
         scheduler = IntervalScheduler(interval_sec=self.runtime.settings.runtime.scan_interval_sec)
         self.runtime.trade_service.recover_active_positions()
+        self._startup_started_at = self.runtime.clock.now()
+        self._startup_blocked_cycles = 0
+        self.runtime.logger.info(
+            "startup_stabilization_begin",
+            extra={
+                "event": {
+                    "stabilization_sec": int(self.runtime.settings.runtime.startup_stabilization_sec),
+                    "stabilization_cycles": int(self.runtime.settings.runtime.startup_stabilization_cycles),
+                }
+            },
+        )
         if self.runtime.settings.notifications.notify_on_startup:
             perf = self._performance_snapshot(pending_signals=0)
             self.runtime.notification_service.on_engine_start(
@@ -48,15 +61,29 @@ class RuntimeWorker:
         loop_errors = 0
         while True:
             try:
+                loop_started = self.runtime.clock.now()
                 scan_result = self.runtime.scan_service.scan_once()
+                allow_entries, startup_reason = self._startup_allows_entries(loop_started)
                 trade_result = self.runtime.trade_service.handle_cycle(
                     signals=scan_result.signals,
                     prices_by_symbol=scan_result.prices_by_symbol,
                     chart_points_by_symbol=scan_result.chart_points_by_symbol,
                     symbol_states=scan_result.symbol_states,
                     scanned_count=scan_result.scanned_symbols,
+                    allow_entries=allow_entries,
+                    entry_block_reason=startup_reason,
                 )
+                if not allow_entries:
+                    self._startup_blocked_cycles += 1
                 perf = self._performance_snapshot(pending_signals=trade_result.max_pos_blocked)
+                outcome_counts = {"blocked": 0, "candidate": 0, "auto": 0}
+                for sig in scan_result.signals:
+                    outcome_raw = sig.meta.get("evaluator_outcome")
+                    outcome = str(outcome_raw).lower() if isinstance(outcome_raw, str) else "blocked"
+                    if outcome not in outcome_counts:
+                        outcome = "blocked"
+                    outcome_counts[outcome] += 1
+                loop_duration_ms = max(0.0, (self.runtime.clock.now() - loop_started).total_seconds() * 1000.0)
                 self.runtime.logger.info(
                     "cycle_completed",
                     extra={
@@ -66,6 +93,30 @@ class RuntimeWorker:
                             "opened": trade_result.opened,
                             "closed": trade_result.closed,
                             "active_positions": perf.active_positions,
+                            "allow_entries": allow_entries,
+                            "startup_reason": startup_reason,
+                        }
+                    },
+                )
+                self.runtime.diagnostics_logger.info(
+                    "cycle_diagnostics",
+                    extra={
+                        "event": {
+                            "loop_duration_ms": round(loop_duration_ms, 2),
+                            "scanned_symbols": scan_result.scanned_symbols,
+                            "scan_errors": scan_result.error_count,
+                            "signals_blocked": outcome_counts["blocked"],
+                            "signals_candidate": outcome_counts["candidate"],
+                            "signals_auto": outcome_counts["auto"],
+                            "opened_trades": trade_result.opened,
+                            "closed_trades": trade_result.closed,
+                            "open_positions": perf.active_positions,
+                            "debounce_blocked": trade_result.debounce_blocked,
+                            "cooldown_blocked": trade_result.cooldown_blocked,
+                            "startup_blocked": trade_result.startup_blocked,
+                            "intent_lock_blocked": trade_result.intent_lock_blocked,
+                            "allow_entries": allow_entries,
+                            "startup_reason": startup_reason,
                         }
                     },
                 )
@@ -110,10 +161,32 @@ class RuntimeWorker:
                     time.sleep(self.runtime.settings.runtime.loop_error_sleep_sec)
                     loop_errors = 0
 
+    def _startup_allows_entries(self, now: datetime) -> tuple[bool, str | None]:
+        if self._startup_started_at is None:
+            return True, None
+        cfg = self.runtime.settings.runtime
+        elapsed_sec = (now - self._startup_started_at).total_seconds()
+        blocked_by_time = elapsed_sec < float(max(0, int(cfg.startup_stabilization_sec)))
+        blocked_by_cycles = self._startup_blocked_cycles < max(0, int(cfg.startup_stabilization_cycles))
+        if not blocked_by_time and not blocked_by_cycles:
+            return True, None
+        reason = (
+            f"STARTUP_STABILIZATION_BLOCK(t={round(elapsed_sec, 1)}s/"
+            f"{int(cfg.startup_stabilization_sec)}s,cycles={self._startup_blocked_cycles}/"
+            f"{int(cfg.startup_stabilization_cycles)})"
+        )
+        return False, reason
+
     def _performance_snapshot(self, *, pending_signals: int) -> PerformanceSnapshot:
         now = self.runtime.clock.now()
         portfolio = self.runtime.repos.runtime_state.get_json("portfolio") or {}
-        starting = float(self.runtime.settings.balance.starting_balance)
+        raw_starting = portfolio.get("starting_balance", self.runtime.settings.balance.starting_balance)
+        try:
+            starting = float(raw_starting)
+        except (TypeError, ValueError):
+            starting = float(self.runtime.settings.balance.starting_balance)
+        if starting <= 0:
+            starting = float(self.runtime.settings.balance.starting_balance)
         balance = float(portfolio.get("balance", starting))
         realized_pnl_quote = float(portfolio.get("realized_pnl", balance - starting))
         pnl_pct = ((realized_pnl_quote / starting) * 100.0) if starting > 0 else 0.0
@@ -178,15 +251,17 @@ class RuntimeWorker:
         start = now - timedelta(hours=24)
         logs_dir = export_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
-        base_name = self.runtime.settings.logging.log_file
+        root_logs_dir = self.runtime.settings.logging.log_dir
         log_files = sorted(
-            self.runtime.settings.logging.log_dir.glob(f"{base_name}*"),
-            key=lambda p: p.name,
+            (p for p in root_logs_dir.rglob("*.log*") if p.is_file()),
+            key=lambda p: str(p.relative_to(root_logs_dir)),
         )
         if command_norm == "log-all":
             for src in log_files:
                 if src.is_file():
-                    dst = logs_dir / src.name
+                    rel = src.relative_to(root_logs_dir)
+                    dst = logs_dir / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
         else:
             out_file = logs_dir / "log_recent_24h.jsonl"

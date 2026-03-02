@@ -1,0 +1,36 @@
+{
+  "name": "intraday_swing_v2_selective",
+  "description": "SE_v1 selective profile: default profile + choppiness filter.",
+  "filters": {
+    "session_filter": true,
+    "session_no_entry_start_hour_utc": 1,
+    "session_no_entry_end_hour_utc": 8,
+    "candidate_min": 65.0,
+    "auto_min": 65.0,
+    "trigger_mode": "WT_HMA_COMBO",
+    "ltf_trigger": "WT_HMA_COMBO",
+    "choppiness_filter": true,
+    "htf_bias": {
+      "timeframe": "1h",
+      "ma_type": "HMA",
+      "period": 50,
+      "directional_filter": true
+    }
+  },
+  "geometry": {
+    "sl_m": 1.5,
+    "tp1_m": 1.0,
+    "tp2_m": 2.3
+  },
+  "entry_policy": {
+    "allow_candidate_entries": true,
+    "allow_auto_entries": true,
+    "candidate_lot_multiplier": 1.0,
+    "auto_lot_multiplier": 1.0,
+    "symbol_cooldown_minutes": 20
+  },
+  "exit_policy": {
+    "enable_session_exit": true,
+    "candidate_specific_exits": false
+  }
+}

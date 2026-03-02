@@ -1,0 +1,32 @@
+{
+  "name": "intraday_swing_v1_candidate_half_experimental",
+  "description": "Sprint 2 placeholder profile with half-size candidate entries.",
+  "filters": {
+    "session_filter": true,
+    "candidate_min": 65.0,
+    "auto_min": 65.0,
+    "trigger_mode": "WT",
+    "ltf_trigger": "WT",
+    "htf_bias": {
+      "timeframe": "1h",
+      "ma_type": "EMA",
+      "period": 50,
+      "directional_filter": true
+    }
+  },
+  "geometry": {
+    "sl_m": 1.5,
+    "tp1_m": 1.0,
+    "tp2_m": 2.0
+  },
+  "entry_policy": {
+    "allow_candidate_entries": true,
+    "allow_auto_entries": true,
+    "candidate_lot_multiplier": 0.5,
+    "auto_lot_multiplier": 1.0
+  },
+  "exit_policy": {
+    "enable_session_exit": true,
+    "candidate_specific_exits": false
+  }
+}

@@ -40,6 +40,7 @@ class BalanceTracker:
 
     def serialize(self) -> dict[str, float | str]:
         return {
+            "starting_balance": self.starting_balance,
             "balance": self._snapshot.balance,
             "realized_pnl": self._snapshot.realized_pnl,
             "day_anchor": self._snapshot.day_anchor.isoformat(),

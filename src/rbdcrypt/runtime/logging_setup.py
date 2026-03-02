@@ -25,12 +25,33 @@ class JsonLineFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
+class LoggerPrefixFilter(logging.Filter):
+    def __init__(self, *prefixes: str) -> None:
+        super().__init__()
+        self.prefixes = tuple(prefixes)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return any(record.name.startswith(pfx) for pfx in self.prefixes)
+
+
+def _make_file_handler(path: Path, cfg: LoggingSettings, formatter: logging.Formatter) -> RotatingFileHandler:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        filename=path,
+        maxBytes=cfg.max_bytes,
+        backupCount=cfg.backup_count,
+        encoding="utf-8",
+    )
+    handler.setFormatter(formatter)
+    return handler
+
+
 def setup_logging(cfg: LoggingSettings, logger_name: str = "rbdcrypt") -> logging.Logger:
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(getattr(logging, cfg.level.upper(), logging.INFO))
-    logger.handlers.clear()
-    logger.propagate = False
+    namespace_logger = logging.getLogger(logger_name)
+    namespace_logger.setLevel(getattr(logging, cfg.level.upper(), logging.INFO))
+    namespace_logger.handlers.clear()
+    namespace_logger.propagate = False
 
     formatter: logging.Formatter
     if cfg.jsonl:
@@ -38,17 +59,45 @@ def setup_logging(cfg: LoggingSettings, logger_name: str = "rbdcrypt") -> loggin
     else:
         formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
 
-    file_handler = RotatingFileHandler(
-        filename=cfg.log_path,
-        maxBytes=cfg.max_bytes,
-        backupCount=cfg.backup_count,
-        encoding="utf-8",
-    )
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    # Namespace-wide fallback log for backward compatibility.
+    namespace_logger.addHandler(_make_file_handler(cfg.log_path, cfg, formatter))
+
+    system_handler = _make_file_handler(cfg.log_dir / "system.log", cfg, formatter)
+    system_handler.addFilter(LoggerPrefixFilter("rbdcrypt.system", "rbdcrypt.app", "rbdcrypt.runtime"))
+    namespace_logger.addHandler(system_handler)
+
+    signals_handler = _make_file_handler(cfg.log_dir / "signals.log", cfg, formatter)
+    signals_handler.addFilter(LoggerPrefixFilter("rbdcrypt.signals"))
+    namespace_logger.addHandler(signals_handler)
+
+    trades_handler = _make_file_handler(cfg.log_dir / "trades.log", cfg, formatter)
+    trades_handler.addFilter(LoggerPrefixFilter("rbdcrypt.trades"))
+    namespace_logger.addHandler(trades_handler)
+
+    diagnostics_handler = _make_file_handler(cfg.log_dir / "health" / "diagnostics.log", cfg, formatter)
+    diagnostics_handler.addFilter(LoggerPrefixFilter("rbdcrypt.health", "rbdcrypt.diagnostics"))
+    namespace_logger.addHandler(diagnostics_handler)
 
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+    namespace_logger.addHandler(stream_handler)
 
-    return logger
+    for child_name in (
+        "rbdcrypt.system",
+        "rbdcrypt.app",
+        "rbdcrypt.runtime",
+        "rbdcrypt.signals",
+        "rbdcrypt.trades",
+        "rbdcrypt.health",
+        "rbdcrypt.diagnostics",
+    ):
+        child = logging.getLogger(child_name)
+        child.setLevel(namespace_logger.level)
+        child.propagate = True
+        child.handlers.clear()
+
+    return logging.getLogger("rbdcrypt.system")
+
+
+def get_component_logger(component: str) -> logging.Logger:
+    return logging.getLogger(f"rbdcrypt.{component}")

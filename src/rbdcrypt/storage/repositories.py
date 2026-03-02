@@ -53,8 +53,9 @@ class SignalRepository:
                 INSERT INTO signals (
                     symbol, interval, bar_time, direction, price, power_score,
                     candidate_pass, auto_pass, blocked_reasons, metrics_json,
-                    power_breakdown_json, meta_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    power_breakdown_json, meta_json, evaluator_outcome,
+                    strategy_profile, trigger_mode, bias_mode, blocked_reason_codes_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     signal.symbol,
@@ -69,6 +70,11 @@ class SignalRepository:
                     _json_dumps(signal.metrics),
                     _json_dumps(signal.power_breakdown),
                     _json_dumps(signal.meta),
+                    str(signal.meta.get("evaluator_outcome")) if signal.meta.get("evaluator_outcome") is not None else None,
+                    str(signal.meta.get("strategy_profile")) if signal.meta.get("strategy_profile") is not None else None,
+                    str(signal.meta.get("trigger_mode")) if signal.meta.get("trigger_mode") is not None else None,
+                    str(signal.meta.get("bias_mode")) if signal.meta.get("bias_mode") is not None else None,
+                    _json_dumps(signal.meta.get("blocked_reason_codes", [])),
                     _dt_to_str(signal.created_at),
                 ),
             )
@@ -289,8 +295,9 @@ class TradeRepository:
                 INSERT OR REPLACE INTO trades_closed (
                     trade_id, position_id, symbol, side, qty, entry_price, exit_price,
                     initial_sl, initial_tp, current_sl, current_tp, opened_at, closed_at,
-                    entry_bar_time, exit_reason, pnl_pct, pnl_quote, rr_initial, fee_paid, meta_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    entry_bar_time, exit_reason, pnl_pct, pnl_quote, rr_initial, fee_paid, meta_json,
+                    profile_id, trigger_mode, bias_mode, entry_layer, execution_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade.trade_id,
@@ -313,6 +320,11 @@ class TradeRepository:
                     trade.rr_initial,
                     trade.fee_paid,
                     _json_dumps(trade.meta),
+                    str(trade.meta.get("profile_id")) if trade.meta.get("profile_id") is not None else None,
+                    str(trade.meta.get("trigger_mode")) if trade.meta.get("trigger_mode") is not None else None,
+                    str(trade.meta.get("bias_mode")) if trade.meta.get("bias_mode") is not None else None,
+                    str(trade.meta.get("entry_layer")) if trade.meta.get("entry_layer") is not None else None,
+                    str(trade.meta.get("execution_mode")) if trade.meta.get("execution_mode") is not None else None,
                 ),
             )
             if close_conn:
@@ -430,6 +442,47 @@ class HeartbeatRepository:
                 "meta": json.loads(row["meta_json"]),
                 "created_at": row["created_at"],
             }
+
+
+class SystemEventRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def insert(self, *, event_type: str, level: str, details: dict[str, Any]) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO system_events (event_type, level, details_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    event_type,
+                    level,
+                    _json_dumps(details),
+                    _dt_to_str(datetime.now(tz=UTC)),
+                ),
+            )
+
+    def recent(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.db.read_only() as conn:
+            rows = conn.execute(
+                """
+                SELECT event_type, level, details_json, created_at
+                FROM system_events
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [
+            {
+                "event_type": r["event_type"],
+                "level": r["level"],
+                "details": json.loads(r["details_json"]),
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
 
 
 class MaintenanceRepository:
@@ -585,6 +638,7 @@ class Repositories:
     errors: ErrorRepository
     runtime_state: RuntimeStateRepository
     heartbeats: HeartbeatRepository
+    system_events: SystemEventRepository
     maintenance: MaintenanceRepository
     candles: CandleRepository
 
@@ -598,6 +652,7 @@ def build_repositories(db: Database) -> Repositories:
         errors=ErrorRepository(db),
         runtime_state=RuntimeStateRepository(db),
         heartbeats=HeartbeatRepository(db),
+        system_events=SystemEventRepository(db),
         maintenance=MaintenanceRepository(db),
         candles=CandleRepository(db),
     )

@@ -21,6 +21,7 @@ class _FakeNtfyClient:
                 "command_enabled": True,
                 "command_topic": "RBD-CRYPT-cmd",
                 "topic": "RBD-CRYPT",
+                "notify_on_cycle_summary": True,
             },
         )()
 
@@ -423,3 +424,32 @@ def test_ntfy_prefixed_env_keys_are_supported(monkeypatch) -> None:
     assert settings.notifications.topic == "RBD-CRYPT"
     assert settings.notifications.ntfy_url == "https://ntfy.sh"
     assert settings.notifications.log_backup_prefer_7z is True
+
+
+def test_ntfy_prefixed_env_keys_override_legacy_keys(monkeypatch) -> None:
+    monkeypatch.setenv("NOTIFICATIONS__ENABLED", "false")
+    monkeypatch.setenv("NOTIFICATIONS__TOPIC", "LEGACY-TOPIC")
+    monkeypatch.setenv("NOTIFICATIONS__NTFY_ENABLED", "true")
+    monkeypatch.setenv("NOTIFICATIONS__NTFY_TOPIC", "RBD-CRYPT")
+    monkeypatch.setenv("NOTIFICATIONS__URL", "https://ntfy.sh")
+
+    settings = AppSettings(_env_file=None)
+
+    assert settings.notifications.enabled is True
+    assert settings.notifications.topic == "RBD-CRYPT"
+    assert settings.notifications.ntfy_url == "https://ntfy.sh"
+
+
+def test_notification_service_sends_startup_summary_outside_slot() -> None:
+    clock = {"now": datetime(2026, 2, 27, 10, 7, tzinfo=UTC)}
+    notifier = _FakeNtfyClient()
+    service = NotificationService(
+        notifier=notifier,
+        logger=_logger(),
+        now_fn=lambda: clock["now"],
+    )
+
+    service.on_engine_start(performance=_perf(), open_positions=[])
+
+    assert len(notifier.calls) == 1
+    assert notifier.calls[0]["title"] == "SUMMARY"
