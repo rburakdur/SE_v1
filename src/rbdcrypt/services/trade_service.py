@@ -1108,7 +1108,8 @@ class TradeService:
     @staticmethod
     def _signal_key(signal: SignalEvent) -> str:
         bar_time = signal.bar_time.astimezone(UTC) if signal.bar_time.tzinfo else signal.bar_time.replace(tzinfo=UTC)
-        return f"{signal.symbol}|{bar_time.isoformat()}|{signal.direction.value}"
+        # Symbol+bar-time lock: do not re-enter on the same candle in either direction.
+        return f"{signal.symbol}|{bar_time.isoformat()}"
 
     def _increment_flap_counter(self, key: str) -> None:
         if key not in self._flap_counters:

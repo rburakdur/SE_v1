@@ -43,6 +43,20 @@ def _candidate_signal(now: datetime, symbol: str = "ADAUSDT") -> SignalEvent:
     )
 
 
+def _candidate_signal_short_same_bar(signal: SignalEvent) -> SignalEvent:
+    return SignalEvent(
+        symbol=signal.symbol,
+        interval=signal.interval,
+        bar_time=signal.bar_time,
+        direction=SignalDirection.SHORT,
+        price=signal.price,
+        power_score=signal.power_score,
+        candidate_pass=True,
+        auto_pass=False,
+        meta={"entry_atr14": 1.0, "evaluator_outcome": "candidate"},
+    )
+
+
 def test_startup_block_marks_signal_and_next_cycle_debounces(repos, tmp_path: Path) -> None:
     now = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
     settings = _settings(tmp_path / "runtime_snapshot.json")
@@ -136,3 +150,35 @@ def test_restart_simulation_does_not_duplicate_open_position(repos, tmp_path: Pa
 
     assert replay.opened == 0
     assert repos.positions.count_active() == 1
+
+
+def test_same_candle_lock_blocks_opposite_direction_retry(repos, tmp_path: Path) -> None:
+    now = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
+    settings = _settings(tmp_path / "runtime_snapshot.json")
+    service = TradeService.from_settings(
+        settings=settings,
+        broker=PaperBroker(),
+        repos=repos,
+        now_fn=lambda: now,
+        logger=_logger(),
+    )
+    long_signal = _candidate_signal(now, "ETHUSDT")
+    long_signal_id = repos.signals.insert_signal(long_signal)
+    long_signal.meta["db_signal_id"] = long_signal_id
+
+    startup_block = service.handle_cycle(
+        signals=[long_signal],
+        prices_by_symbol={},
+        symbol_states={},
+        allow_entries=False,
+        entry_block_reason="STARTUP_STABILIZATION_BLOCK",
+    )
+    assert startup_block.startup_blocked == 1
+
+    short_signal = _candidate_signal_short_same_bar(long_signal)
+    short_signal_id = repos.signals.insert_signal(short_signal)
+    short_signal.meta["db_signal_id"] = short_signal_id
+    replay = service.handle_cycle(signals=[short_signal], prices_by_symbol={}, symbol_states={})
+
+    assert replay.opened == 0
+    assert replay.debounce_blocked == 1
